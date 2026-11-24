@@ -1,7 +1,10 @@
 import { spawn } from "child_process";
-import { existsSync } from "fs";
-import { join } from "path";
 import { buildAcpProcessEnv } from "../utils/w2Proxy.js";
+import {
+  buildAcpPathEnv,
+  killAcpChild,
+  resolveAcpSpawn,
+} from "../utils/acpRuntime.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const acpModelsCache = new Map();
@@ -10,14 +13,8 @@ export function clearAcpModelsCache() {
   acpModelsCache.clear();
 }
 
-function resolveAcpCommand(command) {
-  const homeDir = process.env.HOME || "";
-  const defaultAgyBin = join(homeDir, ".gemini", "bin", "agy");
-  if (!command || command === "agy") {
-    if (existsSync(defaultAgyBin)) return defaultAgyBin;
-    return command || "agy";
-  }
-  return command;
+function resolveAcpCommand(command, pathEnv) {
+  return resolveAcpSpawn(command || "agy", { pathEnv });
 }
 
 function normalizeArgs(args) {
@@ -88,9 +85,10 @@ export async function discoverAcpModels({
   timeoutMs = 15000,
   forceRefresh = false,
 } = {}) {
-  const resolvedCommand = resolveAcpCommand(command);
+  const pathEnv = buildAcpPathEnv(process.env.PATH || "");
+  const resolved = resolveAcpCommand(command, pathEnv);
   const parsedArgs = normalizeArgs(args);
-  const cacheKey = `${resolvedCommand}::${JSON.stringify(parsedArgs)}`;
+  const cacheKey = `${resolved.command}::${JSON.stringify(parsedArgs)}`;
 
   if (!forceRefresh) {
     const cached = acpModelsCache.get(cacheKey);
@@ -99,17 +97,8 @@ export async function discoverAcpModels({
     }
   }
 
-  const homeDir = process.env.HOME || "";
-  const extraPath = [
-    join(homeDir, ".gemini", "bin"),
-    join(homeDir, ".local", "bin"),
-    process.env.PATH || "",
-  ]
-    .filter(Boolean)
-    .join(":");
-
   const { env: spawnEnv } = await buildAcpProcessEnv(
-    { ...process.env, PATH: extraPath },
+    { ...process.env, PATH: pathEnv },
     customEnv || {}
   );
 
@@ -118,11 +107,12 @@ export async function discoverAcpModels({
     let stdoutBuf = "";
     let stderrText = "";
 
-    const child = spawn(resolvedCommand, parsedArgs, {
+    const child = spawn(resolved.command, parsedArgs, {
       env: spawnEnv,
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
-      shell: process.platform === "win32",
+      // Absolute path already resolved: no shell needed except Windows .cmd/.bat shims.
+      shell: resolved.useShell,
     });
 
     const cleanup = () => {
@@ -131,11 +121,7 @@ export async function discoverAcpModels({
         if (!child.stdin.destroyed) child.stdin.end();
       } catch {}
       setTimeout(() => {
-        if (!child.killed) {
-          try {
-            child.kill("SIGTERM");
-          } catch {}
-        }
+        killAcpChild(child);
       }, 200);
     };
 
@@ -159,7 +145,7 @@ export async function discoverAcpModels({
     };
 
     child.on("error", (err) => {
-      done(new Error(`ACP spawn error (${resolvedCommand}): ${err.message}`));
+      done(new Error(`ACP spawn error (${resolved.command}): ${err.message}`));
     });
 
     child.stderr.on("data", (chunk) => {

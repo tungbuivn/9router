@@ -14,12 +14,20 @@ function defaultDir() {
 function getDataDir() {
   const configured = process.env.DATA_DIR;
   if (!configured) return defaultDir();
+
+  // Mirror src/lib/dataDir.js: a Unix-style DATA_DIR (Docker/.env) is not valid on
+  // Windows — path.join would create a relative `C:\var\lib\...` tree.
+  if (process.platform === "win32" && /^\//.test(configured)) {
+    console.warn(`[DATA_DIR] '${configured}' is a Unix path on Windows \u2192 fallback to default`);
+    return defaultDir();
+  }
+
   try {
     fs.mkdirSync(configured, { recursive: true });
     return configured;
   } catch (e) {
     if (e?.code === "EACCES" || e?.code === "EPERM" || e?.code === "ENOENT" || e?.code === "EROFS") {
-      console.warn(`[DATA_DIR] '${configured}' not writable or path invalid (${e.code}) → fallback ~/.${APP_NAME}`);
+      console.warn(`[DATA_DIR] '${configured}' not writable or path invalid (${e.code}) \u2192 fallback ~/.${APP_NAME}`);
       return defaultDir();
     }
     throw e;

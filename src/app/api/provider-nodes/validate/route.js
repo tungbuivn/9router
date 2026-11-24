@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { assertPublicUrl } from "@/shared/utils/ssrfGuard.js";
 import { isLocalRequest } from "@/dashboardGuard";
 import { buildAcpProcessEnv } from "open-sse/utils/w2Proxy.js";
+import { buildAcpPathEnv, killAcpChild, resolveAcpSpawn } from "open-sse/utils/acpRuntime.js";
 
 // Fetch with timeout wrapper
 const fetchWithTimeout = (url, options, timeout = 10000) => {
@@ -74,19 +75,25 @@ export async function POST(request) {
 
       try {
         const { spawn } = await import("child_process");
-        const { env: spawnEnv } = await buildAcpProcessEnv(process.env, customEnv || {});
+        const pathEnv = buildAcpPathEnv(process.env.PATH || "");
+        const resolved = resolveAcpSpawn(command.trim(), { pathEnv });
+        const { env: spawnEnv } = await buildAcpProcessEnv(
+          { ...process.env, PATH: pathEnv },
+          customEnv || {}
+        );
         const result = await new Promise((resolve) => {
           let child;
           const timeout = setTimeout(() => {
-            try { if (child && !child.killed) child.kill("SIGTERM"); } catch {}
+            killAcpChild(child);
             resolve({ valid: false, error: "Timeout waiting for ACP handshake (5s)" });
           }, 5000);
 
           try {
-            child = spawn(command.trim(), parsedArgs, {
+            child = spawn(resolved.command, parsedArgs, {
               env: spawnEnv,
               stdio: ["pipe", "pipe", "pipe"],
-              shell: process.platform === "win32",
+              // Absolute path already resolved: no shell needed except Windows .cmd/.bat shims.
+              shell: resolved.useShell,
             });
           } catch (spawnErr) {
             clearTimeout(timeout);
@@ -115,7 +122,7 @@ export async function POST(request) {
                 if (msg.result?.protocolVersion !== undefined || msg.result?.agentInfo || msg.result?.agentCapabilities) {
                   clearTimeout(timeout);
                   answered = true;
-                  try { child.kill("SIGTERM"); } catch {}
+                  killAcpChild(child);
                   return resolve({
                     valid: true,
                     method: "acp_initialize",

@@ -35,7 +35,17 @@ const PUBLIC_API_PATHS = [
 
 // Public top-level prefixes (LLM API endpoints with their own API key auth).
 // Keep root-level rewrites here too: middleware runs before Next.js rewrites.
-const PUBLIC_PREFIXES = ["/v1", "/v1beta", "/api/v1", "/api/v1beta", "/codex", "/responses", "/api/chat"];
+const PUBLIC_PREFIXES = [
+  "/v1",
+  "/v1beta",
+  "/api/v1",
+  "/api/v1beta",
+  "/codex",
+  "/responses",
+  "/api/chat",
+  "/api/tags",
+  "/api/show",
+];
 
 // Always require JWT token regardless of requireLogin setting
 const ALWAYS_PROTECTED = [
@@ -66,7 +76,6 @@ const PROTECTED_API_PATHS = [
   "/api/cloud",
   "/api/media-providers",
   "/api/pricing",
-  "/api/tags",
   "/api/cli-tools",
   "/api/mcp",
   "/api/translator",
@@ -224,6 +233,9 @@ export async function proxy(request) {
 
   // Always protected - require valid JWT or local CLI token (machineId-based)
   if (ALWAYS_PROTECTED.some((p) => pathname.startsWith(p))) {
+    const settings = await loadSettings();
+    const requireLogin = settings?.requireLogin !== false;
+    if (!requireLogin && isLocalRequest(request)) return NextResponse.next();
     if (await hasValidCliToken(request) || await hasValidToken(request))
       return NextResponse.next();
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -281,6 +293,18 @@ export async function proxy(request) {
     }
 
     return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  // Redirect /login to /dashboard if login is not required
+  if (pathname === "/login") {
+    let requireLogin = true;
+    try {
+      const settings = await loadSettings();
+      if (settings) requireLogin = settings.requireLogin !== false;
+    } catch {}
+    if (!requireLogin) {
+      return NextResponse.redirect(new URL("/dashboard", request.url));
+    }
   }
 
   // Redirect / to /dashboard if logged in, or /dashboard if it's the root

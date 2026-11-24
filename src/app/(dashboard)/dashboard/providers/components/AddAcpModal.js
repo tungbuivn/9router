@@ -260,7 +260,7 @@ export default function AddAcpModal({ isOpen, onClose, onCreated }) {
               label="Executable Command"
               value={formData.command}
               onChange={(e) => setFormData({ ...formData, command: e.target.value })}
-              placeholder="e.g. /home/tungbt/.gemini/bin/agy or dsh-acp"
+              placeholder="e.g. agy (auto-detected) or an absolute path"
               hint="Required. Path to the ACP binary or command."
             />
 

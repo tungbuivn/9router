@@ -9,6 +9,8 @@ function getCandidateZedSettingsPaths() {
   const home = os.homedir();
   const paths = [
     path.join(home, ".config", "zed", "settings.json"),
+    // Zed installed as a Flatpak on Linux
+    path.join(home, ".var", "app", "dev.zed.Zed", "config", "zed", "settings.json"),
     path.join(home, "Library", "Application Support", "Zed", "settings.json"),
   ];
   if (process.env.APPDATA) {

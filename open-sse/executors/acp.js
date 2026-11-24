@@ -1,9 +1,18 @@
 import { BaseExecutor } from "./base.js";
 import { spawn } from "child_process";
-import { existsSync } from "fs";
-import { join } from "path";
 import { dbg } from "../utils/debugLog.js";
 import { buildAcpProcessEnv } from "../utils/w2Proxy.js";
+import {
+  buildAcpPathEnv,
+  killAcpChild,
+  resolveAcpSpawn,
+} from "../utils/acpRuntime.js";
+import {
+  buildAcpSessionKey,
+  claimAcpSession,
+  dropAcpSession,
+  saveAcpSession,
+} from "../utils/acpSessionStore.js";
 
 // Helper: JSON-RPC request line
 const rpc = (method, params = {}, id = 1) =>
@@ -303,23 +312,55 @@ export function stripSystemMessagesForAcp(body) {
   return clone;
 }
 
-// Helper: Extract text from messages array
-export function extractPromptText(messages, options = {}) {
+const ACP_PROMPT_DEFAULTS = {
+  historyMaxTurns: 20,
+  historyMaxChars: 24000,
+  turnMaxChars: 4000,
+  systemMaxChars: 12000,
+};
+
+function envLimit(name, fallback) {
+  const raw = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
+function acpPromptLimits(overrides = {}) {
+  return {
+    historyMaxTurns: overrides.historyMaxTurns ?? envLimit("ACP_HISTORY_MAX_TURNS", ACP_PROMPT_DEFAULTS.historyMaxTurns),
+    historyMaxChars: overrides.historyMaxChars ?? envLimit("ACP_HISTORY_MAX_CHARS", ACP_PROMPT_DEFAULTS.historyMaxChars),
+    turnMaxChars: overrides.turnMaxChars ?? envLimit("ACP_TURN_MAX_CHARS", ACP_PROMPT_DEFAULTS.turnMaxChars),
+    systemMaxChars: overrides.systemMaxChars ?? envLimit("ACP_SYSTEM_MAX_CHARS", ACP_PROMPT_DEFAULTS.systemMaxChars),
+  };
+}
+
+function capAcpText(text, maxChars, label = "") {
+  const value = String(text ?? "");
+  if (!maxChars || value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n… [${label}truncated ${value.length - maxChars} chars]`;
+}
+
+function turnLabel(role) {
+  if (role === "assistant") return "Assistant";
+  if (role === "tool") return "Tool";
+  return "User";
+}
+
+// Collect prompt entries (system blocks + conversation turns) once so the flat and the
+// structured formatters can never drift apart.
+function collectAcpPromptEntries(messages, options = {}) {
   const stripSystem = options.stripSystemPrompt !== false;
-  const parts = [];
+  const entries = [];
   const systemParts = [];
 
-  // Handle top-level system prompt if provided (Claude body.system, Responses body.instructions, Gemini systemInstruction)
+  const addSystem = (text) => {
+    if (!text) return;
+    systemParts.push(text);
+    if (!stripSystem) entries.push({ type: "system", text });
+  };
+
+  // Top-level system prompt (Claude body.system, Responses instructions, Gemini systemInstruction)
   const topLevelSystem = options.system ?? options.instructions ?? options.systemInstruction ?? options.system_instruction;
-  if (topLevelSystem) {
-    const sysContent = extractTextFromContent(topLevelSystem);
-    if (sysContent) {
-      systemParts.push(sysContent);
-      if (!stripSystem) {
-        parts.push(`System instructions:\n${sysContent}`);
-      }
-    }
-  }
+  if (topLevelSystem) addSystem(extractTextFromContent(topLevelSystem));
 
   if (Array.isArray(messages)) {
     let seenKeptTurn = false;
@@ -330,34 +371,140 @@ export function extractPromptText(messages, options = {}) {
       if (!rawContent) continue;
 
       if (SYSTEM_ROLES.has(role)) {
-        systemParts.push(rawContent);
-        if (!stripSystem) {
-          parts.push(`System instructions:\n${rawContent}`);
-        }
-      } else if (stripSystem && !seenKeptTurn && (role === "user" || role === "") && isMasqueradedUserSystemPrompt(rawContent)) {
-        systemParts.push(rawContent);
-      } else {
-        const content = stripSystem ? stripEmbeddedSystemTags(rawContent) : rawContent;
-        if (!content) {
-          systemParts.push(rawContent);
-          continue;
-        }
-        seenKeptTurn = true;
-        if (role === "assistant" || role === "model") {
-          parts.push(`Assistant: ${content}`);
-        } else {
-          parts.push(`User: ${content}`);
-        }
+        addSystem(rawContent);
+        continue;
       }
+
+      if (stripSystem && !seenKeptTurn && (role === "user" || role === "") && isMasqueradedUserSystemPrompt(rawContent)) {
+        systemParts.push(rawContent);
+        continue;
+      }
+
+      const content = stripSystem ? stripEmbeddedSystemTags(rawContent) : rawContent;
+      if (!content) {
+        systemParts.push(rawContent);
+        continue;
+      }
+      seenKeptTurn = true;
+      entries.push({
+        type: "turn",
+        role: role === "assistant" || role === "model" ? "assistant" : role === "tool" ? "tool" : "user",
+        text: content,
+      });
     }
   }
 
+  return { entries, systemParts };
+}
+
+// Helper: Extract text from messages array as a flat "User:/Assistant:" transcript
+// (kept for callers that want the whole conversation in one string).
+export function extractPromptText(messages, options = {}) {
+  const { entries, systemParts } = collectAcpPromptEntries(messages, options);
+
   // If stripping system prompt left no content at all, fallback to system content
-  if (parts.length === 0 && systemParts.length > 0) {
+  if (entries.length === 0 && systemParts.length > 0) {
     return systemParts.join("\n\n");
   }
 
-  return parts.join("\n\n");
+  return entries
+    .map((entry) =>
+      entry.type === "system" ? `System instructions:\n${entry.text}` : `${turnLabel(entry.role)}: ${entry.text}`
+    )
+    .join("\n\n");
+}
+
+/**
+ * Build the prompt for a single ACP turn.
+ *
+ * ACP servers are agents, not stateless chat models: handing them the entire
+ * flattened transcript made them treat it as a conversation to continue instead of
+ * a request to answer (long histories got "completed"/re-answered). So the history
+ * is capped and clearly framed, and the newest user turn is marked as the request.
+ */
+export function buildAcpPrompt(messages, options = {}) {
+  const limits = acpPromptLimits(options.limits);
+  const { entries } = collectAcpPromptEntries(messages, options);
+
+  const systemText = capAcpText(
+    entries.filter((entry) => entry.type === "system").map((entry) => entry.text).join("\n\n"),
+    limits.systemMaxChars,
+    "system "
+  ).trim();
+
+  const turns = entries
+    .filter((entry) => entry.type === "turn")
+    .map((entry) => ({ role: entry.role, text: entry.text }));
+
+  const currentTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+  const history = turns.slice(0, -1);
+  const historyUserTexts = history.filter((turn) => turn.role === "user").map((turn) => turn.text);
+
+  if (!currentTurn) {
+    return {
+      prompt: systemText,
+      currentRequestText: "",
+      currentRole: null,
+      historyUserTexts: [],
+      historyTurns: 0,
+      omittedTurns: 0,
+      canResume: false,
+    };
+  }
+
+  const currentRequestText = currentTurn.text;
+  const canResume = Boolean(
+    currentTurn.role === "user" && currentRequestText.trim() && history.length > 0
+  );
+
+  // Single-turn request: keep the plain shape, no framing needed.
+  if (history.length === 0) {
+    return {
+      prompt: systemText ? `System instructions:\n${systemText}\n\n${currentRequestText}` : currentRequestText,
+      currentRequestText,
+      currentRole: currentTurn.role,
+      historyUserTexts,
+      historyTurns: 0,
+      omittedTurns: 0,
+      canResume: false,
+    };
+  }
+
+  // Keep the newest turns that fit, dropping the oldest ones first.
+  const kept = [];
+  let usedChars = 0;
+  let omittedTurns = 0;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i];
+    const text = capAcpText(turn.text, limits.turnMaxChars, "turn ");
+    if (kept.length >= limits.historyMaxTurns || usedChars + text.length > limits.historyMaxChars) {
+      omittedTurns = i + 1;
+      break;
+    }
+    kept.unshift({ role: turn.role, text });
+    usedChars += text.length;
+  }
+
+  const blocks = [];
+  if (systemText) blocks.push(`## System instructions\n${systemText}`);
+  blocks.push(
+    `## Conversation so far${omittedTurns > 0 ? ` (${omittedTurns} earlier turn(s) omitted)` : ""}\n` +
+      kept.map((turn) => `${turnLabel(turn.role)}: ${turn.text}`).join("\n\n")
+  );
+  blocks.push(`## Current request\n${currentRequestText}`);
+  blocks.push(
+    'Answer the request under "Current request". Use "Conversation so far" only as context — never continue or complete an earlier answer.'
+  );
+
+  return {
+    prompt: blocks.join("\n\n"),
+    currentRequestText,
+    currentRole: currentTurn.role,
+    historyUserTexts,
+    historyTurns: history.length,
+    omittedTurns,
+    canResume,
+  };
 }
 
 function extractResultText(result) {
@@ -376,6 +523,68 @@ function extractResultText(result) {
   return "";
 }
 
+// Shown when an ACP turn ends with zero text, so clients see a reason instead of
+// an empty assistant message (typically a rejected/failed tool call).
+export const ACP_EMPTY_TURN_NOTICE =
+  "ACP agent finished without text output (its tool call was rejected or failed).";
+
+/**
+ * Choose the optionId to answer an ACP `session/request_permission` request with.
+ * ACP kinds are `allow_once`, `allow_always`, `reject_once`, `reject_always`.
+ */
+export function pickAcpPermissionOption(options = [], { prefer = "allow" } = {}) {
+  const list = Array.isArray(options)
+    ? options.filter((o) => o && (o.optionId || o.id))
+    : [];
+  if (list.length === 0) return null;
+
+  const kindOf = (o) => String(o.kind || "").toLowerCase();
+  const nameOf = (o) => String(o.name || o.optionId || o.id || "").toLowerCase();
+  const isDeny = (o) =>
+    kindOf(o).startsWith("reject") || kindOf(o) === "deny" || /deny|reject|\bno\b|cancel/.test(nameOf(o));
+  const isAllow = (o) =>
+    kindOf(o).startsWith("allow") || /allow|approve|accept|\byes\b/.test(nameOf(o));
+
+  if (prefer === "deny") {
+    const deny = list.find(isDeny);
+    return deny ? deny.optionId || deny.id : null;
+  }
+
+  // Prefer a single-shot approval over a permanent one.
+  const allowOnce =
+    list.find((o) => kindOf(o) === "allow_once") ||
+    list.find((o) => kindOf(o) === "allow_always") ||
+    list.find(isAllow) ||
+    list.find((o) => !isDeny(o));
+  return allowOnce ? allowOnce.optionId || allowOnce.id : null;
+}
+
+/**
+ * Build the JSON-RPC reply for a server→client ACP request.
+ *
+ * `session/request_permission` must be answered with the ACP outcome object
+ * (`{ outcome: { outcome: "selected", optionId } }`); the old `{ outcome: "accept" }`
+ * shape made agents mark the tool call failed and end the turn with no text.
+ * Everything else is answered with `-32601` because this client advertises no
+ * fs/terminal capabilities.
+ */
+export function buildAcpClientReply(msg, { permissionMode = process.env.ACP_PERMISSION_MODE || "allow" } = {}) {
+  const method = msg?.method || "";
+
+  if (method === "session/request_permission") {
+    const optionId = pickAcpPermissionOption(msg?.params?.options, {
+      prefer: permissionMode === "deny" ? "deny" : "allow",
+    });
+    return optionId
+      ? { result: { outcome: { outcome: "selected", optionId } } }
+      : { result: { outcome: { outcome: "cancelled" } } };
+  }
+
+  return {
+    error: { code: -32601, message: `9Router does not implement ${method || "this method"}` },
+  };
+}
+
 /**
  * AcpExecutor — runs Agent Client Protocol (ACP) servers over stdio
  */
@@ -392,16 +601,11 @@ export class AcpExecutor extends BaseExecutor {
     const signal = opts?.signal || maybeSignal;
 
     const specificData = credentials?.providerSpecificData || {};
-    let command = specificData.command;
-    const homeDir = process.env.HOME || "";
-    const defaultAgyBin = join(homeDir, ".gemini", "bin", "agy");
-    if (!command || command === "agy") {
-      if (existsSync(defaultAgyBin)) {
-        command = defaultAgyBin;
-      } else {
-        command = command || "agy";
-      }
-    }
+    const requestedCommand = specificData.command || "agy";
+    const acpPathEnv = buildAcpPathEnv(process.env.PATH || "");
+    const resolvedSpawn = resolveAcpSpawn(requestedCommand, { pathEnv: acpPathEnv });
+    const command = resolvedSpawn.command;
+    const useShell = resolvedSpawn.useShell;
 
     const args = Array.isArray(specificData.args)
       ? specificData.args
@@ -410,21 +614,54 @@ export class AcpExecutor extends BaseExecutor {
 
     const stripSystemPrompt = resolveAcpStripSystemPrompt(credentials);
 
-    const promptText = extractPromptText(messages || body.input || body.contents, {
+    const acpPrompt = buildAcpPrompt(messages || body.input || body.contents, {
       stripSystemPrompt,
       system: body.system,
       instructions: body.instructions,
       systemInstruction: body.systemInstruction || body.system_instruction,
     });
+    const promptText = acpPrompt.prompt || acpPrompt.currentRequestText || "";
     const cleanModel = (model || "").includes("/") ? model.split("/").pop() : model;
     const workspaceCwd = process.cwd();
 
-    const geminiBinDir = join(homeDir, ".gemini", "bin");
-    const localBinDir = join(homeDir, ".local", "bin");
+    // Reuse the agent's own session when the conversation prefix matches, so only the
+    // newest turn has to be sent. `claimKey` is the fingerprint a previous turn saved;
+    // `saveKey` is the one the *next* request will look up.
+    const sessionKeyBase = {
+      provider: credentials?.provider || opts?.provider || "",
+      command,
+      cwd: workspaceCwd,
+      model: cleanModel || "",
+    };
+    const claimKey = acpPrompt.canResume
+      ? buildAcpSessionKey({ ...sessionKeyBase, historyUserTexts: acpPrompt.historyUserTexts })
+      : null;
+    const saveKey = acpPrompt.currentRole === "user" && acpPrompt.currentRequestText.trim()
+      ? buildAcpSessionKey({
+        ...sessionKeyBase,
+        historyUserTexts: [...acpPrompt.historyUserTexts, acpPrompt.currentRequestText],
+      })
+      : null;
+    const sessionClaim = claimKey
+      ? claimAcpSession(claimKey)
+      : { sessionId: null, claimed: false };
+    let resumeSessionId = sessionClaim.sessionId;
+    let useResume = Boolean(resumeSessionId);
+    const acpSessionInfo = {
+      key: claimKey,
+      nextKey: saveKey,
+      claimed: sessionClaim.claimed,
+      resumed: useResume,
+      sessionId: resumeSessionId || null,
+      promptChars: promptText.length,
+      historyTurns: acpPrompt.historyTurns,
+      omittedTurns: acpPrompt.omittedTurns,
+    };
+
     const { env: spawnEnv, w2Proxy } = await buildAcpProcessEnv(
       {
         ...process.env,
-        PATH: `${geminiBinDir}:${localBinDir}:${process.env.PATH || ""}`,
+        PATH: acpPathEnv,
       },
       customEnv,
       { requestLogId: opts?.requestLogId || null }
@@ -435,6 +672,7 @@ export class AcpExecutor extends BaseExecutor {
 
     let child = null;
     let isStreamClosed = false;
+    let finalizeSessionRef = null;
 
     const sseStream = new ReadableStream({
       start(controller) {
@@ -472,25 +710,21 @@ export class AcpExecutor extends BaseExecutor {
             }
             stdinClosed = true;
           }
-          if (child && !child.killed) {
-            try {
-              child.kill("SIGTERM");
-            } catch {
-              /* ignore */
-            }
-          }
+          killAcpChild(child);
         };
 
         child = spawn(command, args, {
           env: spawnEnv,
           cwd: workspaceCwd,
           stdio: ["pipe", "pipe", "pipe"],
-          shell: process.platform === "win32",
+          // Absolute path already resolved: no shell needed except Windows .cmd/.bat shims.
+          shell: useShell,
         });
 
         child.on("error", (err) => {
           const msg = `ACP server spawn error (${command}): ${err.message}`;
           dbg("ACP", msg);
+          finalizeSessionRef?.(false);
           if (!finished && !isStreamClosed) {
             emit(`data: ${JSON.stringify({ error: { message: msg, type: "acp_error", code: "spawn_failed" } })}\n\n`);
             emit("data: [DONE]\n\n");
@@ -504,6 +738,7 @@ export class AcpExecutor extends BaseExecutor {
           signal.addEventListener("abort", () => {
             isStreamClosed = true;
             finished = true;
+            finalizeSessionRef?.(false);
             terminateChild();
           });
         }
@@ -511,6 +746,7 @@ export class AcpExecutor extends BaseExecutor {
         let idCounter = 1;
         let initReqId = null;
         let newSessionReqId = null;
+        let loadSessionReqId = null;
         let setModelReqId = null;
         let setConfigReqId = null;
         let promptReqId = null;
@@ -519,6 +755,7 @@ export class AcpExecutor extends BaseExecutor {
         const created = Math.floor(Date.now() / 1000);
         let roleEmitted = false;
         let totalText = "";
+        let sessionFinalized = false;
 
         const sendRpc = (method, params) => {
           if (stdinClosed || child.stdin.destroyed) return null;
@@ -529,6 +766,31 @@ export class AcpExecutor extends BaseExecutor {
             /* ignore */
           }
           return id;
+        };
+
+        // A resumed session already holds the conversation, so only the newest turn is sent.
+        const promptForTurn = () => (useResume ? acpPrompt.currentRequestText : promptText);
+
+        const finalizeSession = (ok) => {
+          if (sessionFinalized) return;
+          sessionFinalized = true;
+          dropAcpSession(claimKey);
+          if (ok && sessionId) saveAcpSession(saveKey, sessionId);
+        };
+        finalizeSessionRef = finalizeSession;
+
+        const startTurn = (sid) => {
+          if (cleanModel) {
+            setModelReqId = sendRpc("session/set_model", {
+              sessionId: sid,
+              modelId: cleanModel,
+            });
+          } else {
+            promptReqId = sendRpc("session/prompt", {
+              sessionId: sid,
+              prompt: [{ type: "text", text: promptForTurn() }],
+            });
+          }
         };
 
         const emitDelta = (delta) => {
@@ -557,6 +819,7 @@ export class AcpExecutor extends BaseExecutor {
         };
 
         const finish = (error, finishReason = "stop") => {
+          finalizeSession(!error && Boolean(sessionId));
           if (finished || isStreamClosed) return;
 
           // Emit the terminal chunks before flipping `finished` — emit() refuses to
@@ -572,7 +835,7 @@ export class AcpExecutor extends BaseExecutor {
                     object: "chat.completion.chunk",
                     created,
                     model,
-                    choices: [{ index: 0, delta: { role: "assistant", content: totalText }, finish_reason: null }],
+                    choices: [{ index: 0, delta: { role: "assistant", content: totalText || ACP_EMPTY_TURN_NOTICE }, finish_reason: null }],
                   })}\n\n`
                 );
                 roleEmitted = true;
@@ -617,10 +880,47 @@ export class AcpExecutor extends BaseExecutor {
                 finish(`ACP initialize error: ${msg.error.message || JSON.stringify(msg.error)}`);
                 return;
               }
-              newSessionReqId = sendRpc("session/new", {
-                cwd: workspaceCwd,
-                mcpServers: [],
-              });
+              if (useResume && resumeSessionId) {
+                loadSessionReqId = sendRpc("session/load", {
+                  sessionId: resumeSessionId,
+                  cwd: workspaceCwd,
+                  mcpServers: [],
+                });
+              } else {
+                newSessionReqId = sendRpc("session/new", {
+                  cwd: workspaceCwd,
+                  mcpServers: [],
+                });
+              }
+              continue;
+            }
+
+            // 1a. session/load response → reuse the agent's stored conversation
+            if (loadSessionReqId && msg.id === loadSessionReqId) {
+              if (msg.error) {
+                dbg("ACP", `session/load failed (${msg.error.message || "unknown"}) — using a fresh session`);
+                useResume = false;
+                acpSessionInfo.resumed = false;
+                resumeSessionId = null;
+                newSessionReqId = sendRpc("session/new", {
+                  cwd: workspaceCwd,
+                  mcpServers: [],
+                });
+                continue;
+              }
+              const res = msg.result || {};
+              sessionId = res.sessionId || resumeSessionId;
+              if (!sessionId) {
+                useResume = false;
+                newSessionReqId = sendRpc("session/new", {
+                  cwd: workspaceCwd,
+                  mcpServers: [],
+                });
+                continue;
+              }
+              dbg("ACP", `resumed session ${sessionId}`);
+              acpSessionInfo.sessionId = sessionId;
+              startTurn(sessionId);
               continue;
             }
 
@@ -636,17 +936,8 @@ export class AcpExecutor extends BaseExecutor {
                 finish("ACP server session/new returned no sessionId");
                 return;
               }
-              if (cleanModel) {
-                setModelReqId = sendRpc("session/set_model", {
-                  sessionId,
-                  modelId: cleanModel,
-                });
-              } else {
-                promptReqId = sendRpc("session/prompt", {
-                  sessionId,
-                  prompt: [{ type: "text", text: promptText }],
-                });
-              }
+              acpSessionInfo.sessionId = sessionId;
+              startTurn(sessionId);
               continue;
             }
 
@@ -661,7 +952,7 @@ export class AcpExecutor extends BaseExecutor {
               } else {
                 promptReqId = sendRpc("session/prompt", {
                   sessionId,
-                  prompt: [{ type: "text", text: promptText }],
+                  prompt: [{ type: "text", text: promptForTurn() }],
                 });
               }
               continue;
@@ -671,7 +962,7 @@ export class AcpExecutor extends BaseExecutor {
             if (setConfigReqId && msg.id === setConfigReqId) {
               promptReqId = sendRpc("session/prompt", {
                 sessionId,
-                prompt: [{ type: "text", text: promptText }],
+                prompt: [{ type: "text", text: promptForTurn() }],
               });
               continue;
             }
@@ -696,6 +987,10 @@ export class AcpExecutor extends BaseExecutor {
 
             // 4. Notifications (session/update)
             if (msg.method === "session/update" || msg.method === "$/update") {
+              // `session/load` replays the stored conversation as updates so a client can
+              // render history. Those are not part of this turn's answer — ignore
+              // everything that arrives before we actually send the prompt.
+              if (!promptReqId) continue;
               const params = msg.params || {};
               const update = params.update || {};
               const type = update.sessionUpdate || update.type || params.type;
@@ -717,10 +1012,14 @@ export class AcpExecutor extends BaseExecutor {
               continue;
             }
 
-            // 5. Server-to-client request (e.g. permission or confirmation prompt)
+            // 5. Server-to-client request (permission prompt, fs access, …)
             if (msg.method && msg.id) {
+              const reply = buildAcpClientReply(msg);
               try {
-                child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { outcome: "accept" } }) + "\n");
+                const payload = reply.error
+                  ? { jsonrpc: "2.0", id: msg.id, error: reply.error }
+                  : { jsonrpc: "2.0", id: msg.id, result: reply.result };
+                child.stdin.write(JSON.stringify(payload) + "\n");
               } catch {}
               continue;
             }
@@ -742,23 +1041,25 @@ export class AcpExecutor extends BaseExecutor {
           }
         });
 
-        // Send initial handshake
+        // Send initial handshake. Advertise that this client provides no fs/terminal
+        // services, so agents fall back to their own tools instead of asking us.
         initReqId = sendRpc("initialize", {
           protocolVersion: 1,
           clientInfo: { name: "9router", version: "1.0.0" },
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
         });
       },
       cancel() {
         isStreamClosed = true;
+        finalizeSessionRef?.(false);
         if (child) {
           try {
             if (child.stdin && !child.stdin.destroyed) child.stdin.end();
           } catch {}
-          if (!child.killed) {
-            try {
-              child.kill("SIGTERM");
-            } catch {}
-          }
+          killAcpChild(child);
         }
       },
     });
@@ -782,6 +1083,7 @@ export class AcpExecutor extends BaseExecutor {
         stripSystemPrompt,
         w2Proxy,
         prompt: promptText,
+        session: acpSessionInfo,
       },
     };
   }

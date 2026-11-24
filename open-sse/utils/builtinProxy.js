@@ -110,9 +110,22 @@ export function shouldInterceptHost(hostname, interceptHosts = DEFAULT_BUILTIN_I
   return false;
 }
 
+function defaultDataDir() {
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router");
+  }
+  return path.join(os.homedir(), ".9router");
+}
+
 function resolveMitmDir() {
-  const dataDir = process.env.DATA_DIR || path.join(os.homedir(), ".9router");
-  return path.join(dataDir, "mitm");
+  const configured = process.env.DATA_DIR;
+  // Mirror src/lib/dataDir.js + src/mitm/paths.js: a Unix-style DATA_DIR from .env
+  // (e.g. the Docker value `/var/lib/9router`) is not a valid Windows path — joining
+  // it produces a drive-relative `\var\lib\...` tree well outside the app data dir.
+  if (configured && !(process.platform === "win32" && /^[\\/]/.test(configured))) {
+    return path.join(configured, "mitm");
+  }
+  return path.join(defaultDataDir(), "mitm");
 }
 
 function loadRootCAModule() {
@@ -138,7 +151,13 @@ function findSystemCaBundle() {
 
 /**
  * Ensure ~/.9router/mitm/rootCA.crt exists and build combined ~/.9router/mitm/ca-bundle.pem
- * (OS system CAs + 9Router Root CA) so ACP child processes trust BOTH intercepted and public hosts.
+ * (public roots + 9Router Root CA) so ACP child processes trust BOTH intercepted and public hosts.
+ *
+ * The public half matters: the built-in proxy can be configured to tunnel some hosts
+ * (`interceptHosts`), and clients that treat SSL_CERT_FILE as a REPLACEMENT trust store
+ * (e.g. the Antigravity CLI `agy`) otherwise lose every public root. On Windows/macOS the
+ * OS bundle paths below don't exist, so fall back to Node's bundled public roots — that
+ * keeps the bundle portable instead of shipping the MITM root alone.
  */
 export function ensureBuiltinProxyCerts() {
   const state = getState();
@@ -154,13 +173,20 @@ export function ensureBuiltinProxyCerts() {
 
   const rootPem = fs.readFileSync(generated.cert, "utf8").trim();
   const sysBundle = findSystemCaBundle();
-  let combined = rootPem + "\n";
+  let publicPem = "";
   if (sysBundle) {
     try {
-      const sysPem = fs.readFileSync(sysBundle, "utf8").trim();
-      combined = `${sysPem}\n\n# 9Router Built-in Interceptor Proxy Root CA\n${rootPem}\n`;
+      publicPem = fs.readFileSync(sysBundle, "utf8").trim();
     } catch {}
   }
+  if (!publicPem) {
+    const bundledRoots = Array.isArray(tls.rootCertificates) ? tls.rootCertificates : [];
+    publicPem = bundledRoots.join("\n");
+  }
+
+  const combined = publicPem
+    ? `${publicPem}\n\n# 9Router Built-in Interceptor Proxy Root CA\n${rootPem}\n`
+    : `${rootPem}\n`;
 
   // Only rewrite if missing or changed
   let needsWrite = true;

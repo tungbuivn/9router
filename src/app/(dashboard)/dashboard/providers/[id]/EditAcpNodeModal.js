@@ -121,7 +121,7 @@ export default function EditAcpNodeModal({ isOpen, node, onSave, onClose }) {
           label="Executable Command"
           value={formData.command}
           onChange={(e) => setFormData({ ...formData, command: e.target.value })}
-          placeholder="e.g. /home/tungbt/.gemini/bin/agy"
+          placeholder="e.g. agy (auto-detected) or an absolute path"
         />
 
         <Input

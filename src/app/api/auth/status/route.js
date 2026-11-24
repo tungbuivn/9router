@@ -3,14 +3,20 @@ import { cookies } from "next/headers";
 import { getSettings } from "@/lib/localDb";
 import { isOidcConfigured } from "@/lib/auth/oidc";
 import { isSamlConfigured } from "@/lib/auth/saml.js";
-import { getDashboardAuthSession } from "@/lib/auth/dashboardSession";
+import { getDashboardAuthSession, setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
 
-export async function GET() {
+export async function GET(request) {
   try {
     const settings = await getSettings();
     const cookieStore = await cookies();
-    const session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
+    let session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
     const requireLogin = settings.requireLogin !== false;
+
+    // Auto-login: If login is not required and no session exists, auto-issue session cookie
+    if (!requireLogin && !session) {
+      await setDashboardAuthCookie(cookieStore, request);
+      session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
+    }
     const authMode = settings.authMode || "password";
     const ssoType = settings.ssoType || "oidc";
     const oidcName = String(session?.oidcName || "").trim();

@@ -86,6 +86,46 @@ export function createSSEStream(options = {}) {
   let totalContentLength = 0;
   let accumulatedContent = "";
   let accumulatedThinking = "";
+
+  // Accumulate the text actually delivered to the client.
+  // The per-format checks in the transform loop read the UPSTREAM chunk, which
+  // never carries client-shaped fields when the provider speaks another format
+  // (e.g. a Responses upstream feeding an OpenAI client): the text only exists
+  // on the translated chunk. Without this, such a stream completes with empty
+  // accumulators and is logged as "[Empty streaming response]" even though the
+  // client received the whole answer.
+  const accumulateDelivered = (chunk) => {
+    const delta = chunk?.choices?.[0]?.delta;
+    if (delta) {
+      if (typeof delta.content === "string" && delta.content) {
+        totalContentLength += delta.content.length;
+        accumulatedContent += delta.content;
+      }
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+        totalContentLength += delta.reasoning_content.length;
+        accumulatedThinking += delta.reasoning_content;
+      }
+      return;
+    }
+    if (chunk?.type === "content_block_delta") {
+      if (typeof chunk.delta?.text === "string" && chunk.delta.text) {
+        totalContentLength += chunk.delta.text.length;
+        accumulatedContent += chunk.delta.text;
+      } else if (typeof chunk.delta?.thinking === "string" && chunk.delta.thinking) {
+        totalContentLength += chunk.delta.thinking.length;
+        accumulatedThinking += chunk.delta.thinking;
+      }
+      return;
+    }
+    if (typeof chunk?.message?.content === "string" && chunk.message.content) {
+      totalContentLength += chunk.message.content.length;
+      accumulatedContent += chunk.message.content;
+    }
+    if (typeof chunk?.message?.thinking === "string" && chunk.message.thinking) {
+      totalContentLength += chunk.message.thinking.length;
+      accumulatedThinking += chunk.message.thinking;
+    }
+  };
   let ttftAt = null;
   let sseLineCount = 0;
   let sseEmittedCount = 0;
@@ -376,16 +416,36 @@ export function createSSEStream(options = {}) {
         }
         
         // OpenAI format - content
+        // Only the client-format path accumulates here; when the provider speaks
+        // another format these fields are absent and accumulateDelivered() counts
+        // the translated chunk instead (guarded by `alreadyCounted`).
+        let alreadyCounted = false;
         if (parsed.choices?.[0]?.delta?.content) {
           totalContentLength += parsed.choices[0].delta.content.length;
           accumulatedContent += parsed.choices[0].delta.content;
+          alreadyCounted = true;
         }
         // OpenAI format - reasoning
         if (parsed.choices?.[0]?.delta?.reasoning_content) {
           totalContentLength += parsed.choices[0].delta.reasoning_content.length;
           accumulatedThinking += parsed.choices[0].delta.reasoning_content;
+          alreadyCounted = true;
         }
         
+        // Ollama NDJSON format - content and thinking live on `message`, not
+        // `choices[].delta`. Without this branch the accumulators stay empty and
+        // a successful Ollama stream is logged as "[Empty streaming response]".
+        if (parsed.message && typeof parsed.message === "object") {
+          if (typeof parsed.message.content === "string" && parsed.message.content) {
+            totalContentLength += parsed.message.content.length;
+            accumulatedContent += parsed.message.content;
+          }
+          if (typeof parsed.message.thinking === "string" && parsed.message.thinking) {
+            totalContentLength += parsed.message.thinking.length;
+            accumulatedThinking += parsed.message.thinking;
+          }
+        }
+
         // Gemini format
         if (parsed.candidates?.[0]?.content?.parts) {
           for (const part of parsed.candidates[0].content.parts) {
@@ -454,6 +514,7 @@ export function createSSEStream(options = {}) {
             reqLogger?.appendConvertedChunk?.(output);
             controller.enqueue(sharedEncoder.encode(output));
             sseEmittedCount++;
+            if (!alreadyCounted) accumulateDelivered(item);
           }
         }
 

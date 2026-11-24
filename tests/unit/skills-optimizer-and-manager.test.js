@@ -153,6 +153,16 @@ describe("localSkillsManager (~/.agents/skills ↔ ~/.agents/skills-disabled + s
     const catalogTxt = await fs.readFile(path.join(skillsDir, CATALOG_SKILL_NAME, "SKILL.md"), "utf8");
     expect(catalogTxt).toContain("langchain-build-agent");
     expect(catalogTxt).toContain("langchain-agent-tracing");
+
+    // Frontmatter must stay machine-parseable: YAML escaping (Windows paths) and
+    // no `<`/`>` that would break the XML skill block agents build from it.
+    const descLine = catalogTxt
+      .split("\n")
+      .find((line) => line.startsWith("description: "));
+    expect(descLine).toBeTruthy();
+    const catalogDesc = JSON.parse(descLine.slice("description: ".length));
+    expect(catalogDesc).toContain("langchain-build-agent");
+    expect(catalogDesc).not.toMatch(/[<>]/);
     // Symlink for skill-catalog created in tool dirs
     expect((await fs.lstat(path.join(claudeDir, CATALOG_SKILL_NAME))).isSymbolicLink()).toBe(true);
 
@@ -182,5 +192,28 @@ describe("localSkillsManager (~/.agents/skills ↔ ~/.agents/skills-disabled + s
     const cat = await syncSkillCatalog(opts);
     expect(cat.count).toBe(5);
     expect(cat.descriptionBytes).toBeLessThan(800);
+  });
+
+  it("caps the catalog description at the 1024-char skill-spec limit", async () => {
+    const names = Array.from(
+      { length: 60 },
+      (_, i) => `bulk-skill-with-a-long-name-${String(i).padStart(3, "0")}`
+    );
+    for (const name of names) {
+      await writeFakeSkill(disabledDir, name, "Bulk skill description.");
+    }
+
+    const res = await syncSkillCatalog(opts);
+    expect(res.count).toBe(names.length);
+
+    const catalogTxt = await fs.readFile(path.join(skillsDir, CATALOG_SKILL_NAME, "SKILL.md"), "utf8");
+    const descLine = catalogTxt
+      .split("\n")
+      .find((line) => line.startsWith("description: "));
+    const desc = JSON.parse(descLine.slice("description: ".length));
+    expect(desc.length).toBeLessThanOrEqual(1024);
+    expect(desc).toContain("more)");
+    // Every skill is still listed in the body, only the description is trimmed.
+    expect(catalogTxt).toContain("bulk-skill-with-a-long-name-059");
   });
 });

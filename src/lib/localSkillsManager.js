@@ -3,6 +3,8 @@ import path from "node:path";
 import os from "node:os";
 
 export const CATALOG_SKILL_NAME = "skill-catalog";
+// Skill specs (Claude Code, Zed, …) cap the frontmatter description at 1024 chars.
+const MAX_CATALOG_DESCRIPTION_CHARS = 1024;
 export const CORE_SKILL_NAMES = [
   "code-implementation",
   "diagnosing-bugs",
@@ -44,13 +46,34 @@ function inferGroup(name) {
   return "other";
 }
 
+function parseYamlScalar(raw) {
+  const value = raw.trim();
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/''/g, "'");
+  }
+  return value;
+}
+
+function encodeYamlScalar(value) {
+  // JSON string syntax is a valid YAML double-quoted scalar and escapes
+  // backslashes (Windows paths) and quotes without hand-rolled escaping.
+  return JSON.stringify(String(value));
+}
+
 function parseFrontmatter(content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return { name: "", description: "" };
   const fm = match[1];
 
   const nameMatch = fm.match(/^name:\s*(.+)$/m);
-  const name = nameMatch ? nameMatch[1].trim().replace(/^["']|["']$/g, "") : "";
+  const name = nameMatch ? parseYamlScalar(nameMatch[1]) : "";
 
   let description = "";
   const lines = fm.split(/\r?\n/);
@@ -67,7 +90,7 @@ function parseFrontmatter(content) {
       }
       description = buf.join(" ").trim();
     } else {
-      description = inline.replace(/^["']|["']$/g, "");
+      description = parseYamlScalar(inline);
     }
     break;
   }
@@ -176,6 +199,38 @@ async function syncToolSymlink(name, enabled, { skillsDir, symlinkTargets }) {
 }
 
 /**
+ * Build the catalog frontmatter description. It ends up inside agent prompts (often in an
+ * XML block), so keep it free of `<`/`>` — an unclosed placeholder such as `<name>` makes
+ * the whole block invalid XML — and within the 1024-char skill-spec limit.
+ */
+export function buildCatalogDescription(names, disabledDir) {
+  const head = `On-demand catalog of ${names.length} extra skills stored in ${disabledDir} as {name}/SKILL.md: `;
+  const tail =
+    ". Read a skill's SKILL.md only when the user tags it (@name or /name) or asks for that domain.";
+  const budget = MAX_CATALOG_DESCRIPTION_CHARS - head.length - tail.length;
+  if (budget <= 16) {
+    // Pathologically long skills dir — fall back to a minimal, always-valid description.
+    return `On-demand catalog of ${names.length} extra skills. Read a skill's SKILL.md only when the user tags it (@name or /name) or asks for that domain.`;
+  }
+
+  const kept = [];
+  let used = 0;
+  for (const name of names) {
+    const add = (kept.length > 0 ? 2 : 0) + name.length;
+    if (used + add > budget - 16) break; // reserve room for the "(+N more)" suffix
+    kept.push(name);
+    used += add;
+  }
+
+  const list =
+    kept.length === names.length
+      ? kept.join(", ")
+      : `${kept.join(", ")} (+${names.length - kept.length} more)`;
+
+  return `${head}${list}${tail}`;
+}
+
+/**
  * Regenerate or remove ~/.agents/skills/skill-catalog/SKILL.md so AI agents always know
  * which skills exist in ~/.agents/skills-disabled/ in ~300-500 bytes instead of ~8-10KB.
  */
@@ -204,13 +259,15 @@ export async function syncSkillCatalog(opts = {}) {
 
   await fs.mkdir(catalogDir, { recursive: true });
 
-  const nameList = disabledSkills.map((s) => s.name).join(", ");
-  const shortDesc = `On-demand catalog of ${disabledSkills.length} extra skills stored in ${disabledDir}/<name>/SKILL.md: ${nameList}. Only read a skill's SKILL.md when the user tags it (@name or /name) or asks for that domain.`;
+  const shortDesc = buildCatalogDescription(
+    disabledSkills.map((s) => s.name),
+    disabledDir
+  );
 
   const lines = [
     "---",
     `name: ${CATALOG_SKILL_NAME}`,
-    `description: "${shortDesc.replace(/"/g, "'")}"`,
+    `description: ${encodeYamlScalar(shortDesc)}`,
     "---",
     "",
     "# On-Demand Skill Catalog",

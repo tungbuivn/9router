@@ -8,7 +8,13 @@ export const DEFAULT_W2_PROXY_URL = "http://127.0.0.1:8899";
 export const DEFAULT_LOCAL_NO_PROXY = "localhost,127.0.0.1,::1";
 const DEFAULT_PROBE_TIMEOUT_MS = 250;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"];
-const CA_ENV_KEYS = ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE"];
+// Additive: the child keeps its system roots and adds the MITM root on top.
+const ADDITIVE_CA_ENV_KEYS = ["NODE_EXTRA_CA_CERTS"];
+// Replacement: the value becomes the child's ONLY trust store. Safe only for the built-in
+// proxy bundle (public roots + MITM root). Some ACP servers (the Antigravity CLI `agy`)
+// ignore NODE_EXTRA_CA_CERTS entirely and only read SSL_CERT_FILE.
+const REPLACEMENT_CA_ENV_KEYS = ["SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE"];
+const CA_ENV_KEYS = [...ADDITIVE_CA_ENV_KEYS, ...REPLACEMENT_CA_ENV_KEYS];
 
 const GLOBAL_STATE_KEY = "__nineRouterW2AutoProxyState";
 
@@ -320,6 +326,8 @@ export async function buildAcpProcessEnv(baseEnv = process.env, customEnv = {}, 
 
         const caPath = bp.caBundlePath || bp.caCertPath || resolveCaCertBundlePath();
         if (caPath) {
+          // Built-in bundle = public roots + MITM root, so replacement vars are safe and
+          // required for ACP servers that ignore the additive NODE_EXTRA_CA_CERTS.
           for (const caKey of CA_ENV_KEYS) {
             env[caKey] = caPath;
           }
@@ -388,7 +396,9 @@ export async function buildAcpProcessEnv(baseEnv = process.env, customEnv = {}, 
 
   const caCertPath = resolveCaCertBundlePath();
   if (caCertPath) {
-    for (const caKey of CA_ENV_KEYS) {
+    // External w2 proxies may tunnel these hosts, so only add the CA — replacing the
+    // trust store with a MITM-only bundle would drop every public root.
+    for (const caKey of ADDITIVE_CA_ENV_KEYS) {
       if (!env[caKey]) env[caKey] = caCertPath;
     }
   }

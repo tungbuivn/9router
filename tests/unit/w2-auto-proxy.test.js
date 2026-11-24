@@ -121,9 +121,13 @@ describe("w2 auto-capture proxy (app-wide + ACP)", () => {
     expect(activeRes.env.NO_PROXY).toContain("127.0.0.1");
     expect(activeRes.env.NO_PROXY).toContain("::1");
     if (activeRes.w2Proxy.caCertPath) {
-      expect(activeRes.env.SSL_CERT_FILE).toBe(activeRes.w2Proxy.caCertPath);
-      expect(activeRes.env.AWS_CA_BUNDLE).toBe(activeRes.w2Proxy.caCertPath);
+      // Additive CA only: replacement vars (SSL_CERT_FILE, CURL_CA_BUNDLE, …) would become
+      // the child's whole trust store and break ACP servers that honor them (e.g. agy).
       expect(activeRes.env.NODE_EXTRA_CA_CERTS).toBe(activeRes.w2Proxy.caCertPath);
+      expect(activeRes.env.SSL_CERT_FILE).toBeUndefined();
+      expect(activeRes.env.CURL_CA_BUNDLE).toBeUndefined();
+      expect(activeRes.env.REQUESTS_CA_BUNDLE).toBeUndefined();
+      expect(activeRes.env.AWS_CA_BUNDLE).toBeUndefined();
     }
 
     // Custom proxy on ACP node overrides w2 auto-proxy
@@ -147,6 +151,35 @@ describe("w2 auto-capture proxy (app-wide + ACP)", () => {
     expect(inactiveRes.w2Proxy.active).toBe(false);
     expect(inactiveRes.env.HTTP_PROXY).toBeUndefined();
     expect(inactiveRes.env.HTTPS_PROXY).toBeUndefined();
+  });
+
+  it("for the built-in proxy, exports the full bundle as both additive and replacement CA vars", async () => {
+    vi.resetModules();
+    const bundle = "/tmp/9router-mitm/ca-bundle.pem";
+    vi.doMock("../../open-sse/utils/builtinProxy.js", () => ({
+      ensureBuiltinProxyReady: async () => ({
+        enabled: true,
+        running: true,
+        port: 20129,
+        caBundlePath: bundle,
+        caCertPath: "/tmp/9router-mitm/rootCA.crt",
+      }),
+    }));
+
+    const { buildAcpProcessEnv: build } = await import("../../open-sse/utils/w2Proxy.js");
+    const res = await build({ PATH: "/usr/bin" }, {});
+
+    // `agy` ignores NODE_EXTRA_CA_CERTS and only trusts SSL_CERT_FILE, so the built-in
+    // bundle (public roots + MITM root) must be exported through both kinds of var.
+    expect(res.w2Proxy.mode).toBe("builtin");
+    expect(res.env.NODE_EXTRA_CA_CERTS).toBe(bundle);
+    expect(res.env.SSL_CERT_FILE).toBe(bundle);
+    expect(res.env.CURL_CA_BUNDLE).toBe(bundle);
+    expect(res.env.REQUESTS_CA_BUNDLE).toBe(bundle);
+    expect(res.env.AWS_CA_BUNDLE).toBe(bundle);
+    expect(res.env.HTTP_PROXY).toBe("http://127.0.0.1:20129");
+
+    vi.doUnmock("../../open-sse/utils/builtinProxy.js");
   });
 
   it("proxyAwareFetch routes non-local HTTP requests through active w2 capture proxy and bypasses local requests", async () => {
