@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button } from "@/shared/components";
 import { getModelsByProviderId } from "@/shared/constants/models";
-import { isAnthropicCompatibleProvider, isOpenAICompatibleProvider } from "@/shared/constants/providers";
+import { isAnthropicCompatibleProvider, isOpenAICompatibleProvider, isAcpProvider } from "@/shared/constants/providers";
 
 const STORAGE_KEYS = {
   sessions: "basic-chat.sessions",
@@ -110,14 +110,15 @@ function cloneSession(session) {
 }
 
 function getProviderLabel(connection) {
-  return connection?.name || humanize(connection?.provider || connection?.id || "provider");
+  return connection?.providerSpecificData?.nodeName || connection?.name || humanize(connection?.provider || connection?.id || "provider");
 }
 
 function normalizeStaticModel(model, connection) {
   if (!model?.id) return null;
+  const prefix = connection?.providerSpecificData?.prefix || connection.provider;
   return {
-    id: `${connection.provider}/${model.id}`,
-    requestModel: `${connection.provider}/${model.id}`,
+    id: `${prefix}/${model.id}`,
+    requestModel: `${prefix}/${model.id}`,
     name: model.name || model.id,
     providerId: connection.provider,
     providerName: getProviderLabel(connection),
@@ -134,9 +135,10 @@ function normalizeLiveModel(model, connection) {
     : model?.name || model?.displayName || rawId;
 
   let requestModel = rawId;
-  const isCompatible = isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider);
+  const isCompatible = isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider) || isAcpProvider(connection.provider);
+  const prefix = connection?.providerSpecificData?.prefix || connection.provider;
   if (isCompatible && !rawId.includes("/")) {
-    requestModel = `${connection.provider}/${rawId}`;
+    requestModel = `${prefix}/${rawId}`;
   }
 
   return {
@@ -218,8 +220,13 @@ export default function BasicChatPageClient() {
       setLoadError("");
 
       try {
-        const providersRes = await fetch("/api/providers", { cache: "no-store" });
+        const [providersRes, disabledRes] = await Promise.all([
+          fetch("/api/providers", { cache: "no-store" }),
+          fetch("/api/models/disabled", { cache: "no-store" }).catch(() => null),
+        ]);
         const providersData = await providersRes.json().catch(() => ({}));
+        const disabledData = disabledRes ? await disabledRes.json().catch(() => ({})) : {};
+        const disabledByAlias = disabledData?.disabled || {};
         const connections = Array.isArray(providersData.connections)
           ? providersData.connections.filter((connection) => connection?.isActive !== false)
           : [];
@@ -237,11 +244,13 @@ export default function BasicChatPageClient() {
         for (const connection of connections) {
           const providerId = connection.provider || connection.id;
           const providerName = getProviderLabel(connection);
-          const providerType = isOpenAICompatibleProvider(providerId)
-            ? "openai-compatible"
-            : isAnthropicCompatibleProvider(providerId)
-              ? "anthropic-compatible"
-              : providerId;
+          const providerType = isAcpProvider(providerId)
+            ? "acp"
+            : isOpenAICompatibleProvider(providerId)
+              ? "openai-compatible"
+              : isAnthropicCompatibleProvider(providerId)
+                ? "anthropic-compatible"
+                : providerId;
 
           if (!providerMap.has(providerId)) {
             providerMap.set(providerId, {
@@ -288,10 +297,23 @@ export default function BasicChatPageClient() {
         }
 
         const normalized = Array.from(providerMap.values())
-          .map((group) => ({
-            ...group,
-            models: dedupeModels(group.models).sort((a, b) => a.name.localeCompare(b.name)),
-          }))
+          .map((group) => {
+            const connPrefix = group.connections[0]?.providerSpecificData?.prefix;
+            const disabledSet = new Set([
+              ...(disabledByAlias[group.providerId] || []),
+              ...(connPrefix ? (disabledByAlias[connPrefix] || []) : []),
+            ]);
+            const visibleModels = disabledSet.size > 0
+              ? group.models.filter((m) => {
+                  const bareId = m.id.includes("/") ? m.id.slice(m.id.indexOf("/") + 1) : m.id;
+                  return !disabledSet.has(m.id) && !disabledSet.has(bareId) && !disabledSet.has(m.name);
+                })
+              : group.models;
+            return {
+              ...group,
+              models: dedupeModels(visibleModels).sort((a, b) => a.name.localeCompare(b.name)),
+            };
+          })
           .filter((group) => group.models.length > 0)
           .sort((a, b) => a.providerName.localeCompare(b.providerName));
 

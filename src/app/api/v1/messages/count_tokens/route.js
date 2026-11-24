@@ -1,3 +1,5 @@
+import { withApiRequestLog } from "@/lib/withApiRequestLog.js";
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -72,7 +74,7 @@ export function estimateAnthropicInputTokens(body = {}) {
 /**
  * POST /v1/messages/count_tokens - Mock token count response
  */
-export async function POST(request) {
+export const POST = withApiRequestLog(async function POST(request) {
   let body;
   try {
     body = await request.json();
@@ -90,5 +92,5 @@ export async function POST(request) {
   }), {
     headers: { "Content-Type": "application/json", ...CORS_HEADERS }
   });
-}
+}, { apiType: "count-tokens" });
 

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
+import { setW2AutoProxyConfig } from "open-sse/utils/w2Proxy.js";
+import { syncBuiltinProxyState } from "open-sse/utils/builtinProxy.js";
 import { resetComboRotation } from "open-sse/services/combo.js";
 import bcrypt from "bcryptjs";
 
@@ -85,6 +87,25 @@ export async function PATCH(request) {
       Object.prototype.hasOwnProperty.call(body, "outboundNoProxy")
     ) {
       applyOutboundProxyEnv(settings);
+    }
+
+    // Apply W2 auto capture proxy settings immediately (no restart required)
+    if (
+      Object.prototype.hasOwnProperty.call(body, "w2AutoProxyEnabled") ||
+      Object.prototype.hasOwnProperty.call(body, "w2AutoProxyUrl")
+    ) {
+      setW2AutoProxyConfig(settings);
+    }
+
+    // Apply Built-in Interceptor Proxy settings immediately (start/stop/reload without restart)
+    if (
+      Object.prototype.hasOwnProperty.call(body, "builtinProxyEnabled") ||
+      Object.prototype.hasOwnProperty.call(body, "builtinProxyPort") ||
+      Object.prototype.hasOwnProperty.call(body, "builtinProxyScriptEnabled") ||
+      Object.prototype.hasOwnProperty.call(body, "builtinProxyScript") ||
+      Object.prototype.hasOwnProperty.call(body, "builtinProxyInterceptHosts")
+    ) {
+      await syncBuiltinProxyState(settings);
     }
 
     // Invalidate combo rotation state when strategy settings change

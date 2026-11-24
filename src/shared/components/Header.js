@@ -9,6 +9,7 @@ import HeaderMenu from "@/shared/components/HeaderMenu";
 import HeaderLanguage from "@/shared/components/HeaderLanguage";
 import ThemeToggle from "@/shared/components/ThemeToggle";
 import DonateModal from "@/shared/components/DonateModal";
+import ChatTestPopup from "@/shared/components/ChatTestPopup";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS } from "@/shared/constants/providers";
@@ -90,6 +91,14 @@ const getPageInfo = (pathname) => {
       description:
         "Monitor your API usage, token consumption, and request logs",
       icon: "bar_chart",
+      breadcrumbs: [],
+    };
+  if (pathname.includes("/logs") && !pathname.includes("/console-log"))
+    return {
+      title: "Request Logs",
+      description:
+        "Inspect received requests, before/after message edits, and responses (last 100 on disk)",
+      icon: "receipt_long",
       breadcrumbs: [],
     };
   if (pathname.includes("/auth-files"))
@@ -184,6 +193,7 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
   const [displayName, setDisplayName] = useState("");
   const [loginMethod, setLoginMethod] = useState("");
   const [donateOpen, setDonateOpen] = useState(false);
+  const [chatTestOpen, setChatTestOpen] = useState(false);
 
   // Memoize page info to prevent unnecessary recalculations
   const pageInfo = useMemo(() => getPageInfo(pathname), [pathname]);
@@ -319,6 +329,20 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
         )}
         <HeaderSearch />
         <button
+          type="button"
+          onClick={() => setChatTestOpen((v) => !v)}
+          className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg border text-xs sm:text-sm font-medium transition-colors ${
+            chatTestOpen
+              ? "border-primary bg-primary text-primary-foreground shadow-sm"
+              : "border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
+          }`}
+          title="Test Chat API"
+          aria-label="Test Chat API"
+        >
+          <span className="material-symbols-outlined text-[17px]">chat</span>
+          <span className="hidden sm:inline">Test Chat</span>
+        </button>
+        <button
           onClick={() => setDonateOpen(true)}
           className="hidden sm:flex items-center gap-1.5 px-3 h-8 rounded-lg border border-pink-500/30 bg-pink-500/10 text-pink-600 dark:text-pink-400 hover:bg-pink-500/20 transition-colors text-sm font-medium"
           aria-label="Donate"
@@ -331,6 +355,7 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
         <HeaderMenu onLogout={handleLogout} />
       </div>
       <DonateModal isOpen={donateOpen} onClose={() => setDonateOpen(false)} />
+      <ChatTestPopup isOpen={chatTestOpen} onClose={() => setChatTestOpen(false)} />
     </header>
   );
 }

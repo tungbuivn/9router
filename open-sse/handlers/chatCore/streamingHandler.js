@@ -8,6 +8,7 @@ import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamH
 import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
+import { updateRequestLogStage } from "@/lib/requestFileLogger.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 
@@ -48,7 +49,7 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, requestLogId }) {
   if (onRequestSuccess) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -75,6 +76,9 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     if (log?.errorLine) log.errorLine(reqTag, "✗", `BLOCKED ${status} · ${provider}/${model} · non-SSE (${upstreamContentType})\n    ${shortMsg}`);
     else console.warn(`[STREAM] ${provider} | ${model} | blocked pipe: ${shortMsg} [${status}]`);
     streamController?.handleError?.(new Error(`upstream non-SSE: ${status}`));
+    if (requestLogId) {
+      updateRequestLogStage(requestLogId, "response", { type: "streaming", statusCode: status, error: shortMsg }, { status: "error", statusCode: status, latency: { ttft: 0, total: Date.now() - requestStartTime } }).catch(() => {});
+    }
     return {
       success: false,
       response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
@@ -96,6 +100,15 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     : (message) => buildStreamErrorBytes(HTTP_STATUS.GATEWAY_TIMEOUT, message, sourceFormat);
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
   const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+
+  if (requestLogId) {
+    updateRequestLogStage(
+      requestLogId,
+      "response",
+      { type: "streaming", statusCode: 200, streaming: true, content: null, thinking: null, error: null },
+      { status: "streaming", statusCode: 200 }
+    ).catch(() => {});
+  }
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
@@ -120,16 +133,46 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 /**
  * Build onStreamComplete callback for streaming usage tracking.
  */
-export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
+export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, requestLogId, onStreamFinalized, triggerW2Sync }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
   const onStreamComplete = (contentObj, usage, ttftAt) => {
+    if (onStreamFinalized) onStreamFinalized();
     const latency = {
       ttft: ttftAt ? ttftAt - requestStartTime : Date.now() - requestStartTime,
       total: Date.now() - requestStartTime
     };
     const safeContent = contentObj?.content || "[Empty streaming response]";
     const safeThinking = contentObj?.thinking || null;
+
+    if (requestLogId) {
+      updateRequestLogStage(
+        requestLogId,
+        "response",
+        {
+          type: "streaming",
+          statusCode: 200,
+          streaming: false,
+          content: safeContent,
+          thinking: safeThinking,
+          finishReason: "stop",
+          usage: usage || { prompt_tokens: 0, completion_tokens: 0 },
+          clientResponse: {
+            content: safeContent,
+            thinking: safeThinking,
+            usage: usage || { prompt_tokens: 0, completion_tokens: 0 },
+          },
+          error: null,
+        },
+        {
+          status: "success",
+          statusCode: 200,
+          latency,
+          tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
+        }
+      ).catch(() => {});
+    }
+    triggerW2Sync?.();
 
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,

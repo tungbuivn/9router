@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
-import { ALIAS_TO_ID } from "@/shared/constants/providers";
+import { ALIAS_TO_ID } from "@/shared/constants/providers.js";
 
 // Module cache: one /api/models fetch shared by every useModelCaps instance.
 let cache = null; // { byFull, byId } | null
@@ -46,8 +46,12 @@ function loadModelCaps() {
 export function resolveCaps(byFull, byId, key) {
   if (!key) return null;
   if (byFull[key]) return byFull[key];
+  const keyBase = key.split(":")[0];
+  if (byFull[keyBase]) return byFull[keyBase];
   const bare = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
   if (byId[bare]) return byId[bare];
+  const bareBase = bare.split(":")[0];
+  if (byId[bareBase]) return byId[bareBase];
   const alias = key.includes("/") ? key.slice(0, key.indexOf("/")) : null;
   const provider = alias ? (ALIAS_TO_ID[alias] || alias) : null;
   const c = getCapabilitiesForModel(provider, bare);

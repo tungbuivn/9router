@@ -27,9 +27,17 @@ export async function OPTIONS() {
 }
 
 export async function POST(request) {  
-  // Fallback to local handling
-  await ensureInitialized();
-  
-  return await handleChat(request);
+  try {
+    // Fallback to local handling
+    await ensureInitialized();
+    
+    return await handleChat(request);
+  } catch (err) {
+    console.error("[/v1/chat/completions] Unhandled error:", err);
+    return Response.json(
+      { error: { message: err?.message || String(err), type: "internal_error" } },
+      { status: 500 }
+    );
+  }
 }
 

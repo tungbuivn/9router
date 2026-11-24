@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getProviderConnectionById } from "@/models";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isAcpProvider } from "@/shared/constants/providers";
+import { getProviderNodeById } from "@/lib/db/repos/nodesRepo.js";
 import { GEMINI_CONFIG, ZED_HOSTED_CONFIG } from "@/lib/oauth/constants/oauth";
 import { refreshGoogleToken, refreshCodexToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
@@ -16,6 +17,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
 import { NOUS_MODELS_URL, normalizeNousModels } from "open-sse/services/nous.js";
 import { resolveCommandCodeModels } from "open-sse/services/commandcodeModels.js";
+import { discoverAcpModels } from "open-sse/services/acpModels.js";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import codexProvider from "open-sse/providers/registry/codex.js";
@@ -39,9 +41,25 @@ const withModelCapabilities = (provider, models) => {
     const caps = getCapabilitiesForModel(provider, id);
     const levels = getThinkingLevels(provider, id);
 
+    const contextLength =
+      model.contextLength ??
+      model.context_length ??
+      model.max_context_length ??
+      model.native_context_length ??
+      model.context_window ??
+      model.max_tokens ??
+      caps.contextWindow;
+
+    const maxOutput =
+      model.maxOutput ??
+      model.max_output ??
+      model.max_output_tokens ??
+      caps.maxOutput;
+
     return {
       ...model,
-      contextLength: model.contextLength ?? caps.contextWindow,
+      contextLength,
+      maxOutput,
       isVL: model.isVL ?? caps.vision,
       isReasoning: model.isReasoning ?? caps.reasoning,
       ...(Array.isArray(levels) && levels.length > 0 ? { thinking_levels: levels } : {}),
@@ -650,6 +668,55 @@ export async function GET(request, { params }) {
         provider: connection.provider,
         connectionId: connection.id,
         models: withModelCapabilities(connection.provider, models)
+      });
+    }
+
+    if (isAcpProvider(connection.provider)) {
+      const node = await getProviderNodeById(connection.provider);
+      const specific = connection.providerSpecificData || {};
+      const command = node?.command || specific.command;
+      const args = node?.args || specific.args;
+      const env = node?.env || specific.env || {};
+      const reqUrl = new URL(request.url);
+      const forceRefresh = reqUrl.searchParams.get("refresh") === "1" || reqUrl.searchParams.get("live") === "1";
+
+      let liveModels = [];
+      let discoveryError = null;
+      if (command) {
+        try {
+          liveModels = await discoverAcpModels({ command, args, env, forceRefresh });
+        } catch (err) {
+          discoveryError = err?.message || String(err);
+          console.log(`[ACP] Live model discovery failed for ${connection.provider}:`, discoveryError);
+        }
+      }
+
+      const configuredModels = node?.models || specific.models || [];
+      const defaultModel = node?.defaultModel || specific.defaultModel || node?.defaultConfigOptions?.model || specific.defaultConfigOptions?.model;
+
+      const seen = new Set();
+      const merged = [];
+      const pushModel = (m) => {
+        const id = typeof m === "string" ? m : (m?.id || m?.name);
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        merged.push({
+          id,
+          name: typeof m === "string" ? m : (m?.name || id),
+          ...(typeof m === "object" && m?.description ? { description: m.description } : {}),
+        });
+      };
+
+      for (const m of liveModels) pushModel(m);
+      for (const m of (Array.isArray(configuredModels) ? configuredModels : [])) pushModel(m);
+      if (merged.length === 0 && defaultModel) pushModel(defaultModel);
+      if (merged.length === 0) pushModel("default");
+
+      return NextResponse.json({
+        provider: connection.provider,
+        connectionId: connection.id,
+        models: withModelCapabilities(connection.provider, merged),
+        ...(discoveryError ? { discoveryError } : {}),
       });
     }
 

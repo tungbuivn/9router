@@ -9,7 +9,7 @@ import ProviderIcon from "./ProviderIcon";
 import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isAcpProvider, getProviderAlias } from "@/shared/constants/providers";
 import { parseSearchQuery, matchesSearch } from "@/shared/utils/modelSearchFilter";
 import { getDeactivatedProviderIds } from "@/shared/utils/connectionStatus";
 import { NO_AUTH_PROVIDER_IDS, LIVE_CATALOG_PROVIDERS, liveModelCaps } from "@/shared/utils/selectableModels";
@@ -274,13 +274,17 @@ export default function ModelSelectModal({
     const existingNodeIds = new Set((providerNodes || []).map((n) => n?.id).filter(Boolean));
     const compatibleNodeIds = kindFilter
       ? []
-      : customModels
-          .map((m) => m.providerAlias)
-          .filter((alias) =>
-            (isOpenAICompatibleProvider(alias) || isAnthropicCompatibleProvider(alias)) &&
-            existingNodeIds.has(alias) &&
-            !deactivatedProviderIds.has(alias)
-          );
+      : [
+          ...(providerNodes || [])
+            .filter((node) => node && node.id && (node.type === "acp" || isAcpProvider(node.id)))
+            .map((node) => node.id),
+          ...customModels
+            .map((m) => m.providerAlias)
+            .filter((alias) =>
+              (isOpenAICompatibleProvider(alias) || isAnthropicCompatibleProvider(alias) || isAcpProvider(alias)) &&
+              existingNodeIds.has(alias)
+            ),
+        ].filter((id) => !deactivatedProviderIds.has(id));
 
     // Only show connected providers (including both standard and custom)
     const providerIdsToShow = new Set([
@@ -299,7 +303,7 @@ export default function ModelSelectModal({
     sortedProviderIds.forEach((providerId) => {
       const alias = getProviderAlias(providerId);
       const providerInfo = allProviders[providerId] || { name: providerId, color: "#666" };
-      const isCustomProvider = isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId);
+      const isCustomProvider = isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId) || isAcpProvider(providerId);
 
       // For provider-as-model kinds (webSearch/webFetch): emit a single entry where value === providerId
       if (kindFilter && PROVIDER_AS_MODEL_KINDS.has(kindFilter)) {
@@ -398,8 +402,29 @@ export default function ModelSelectModal({
             value: `${nodePrefix}/${m.id}`,
             isCustom: true,
           }));
+        // For ACP providers, load models from node or connection config
+        const acpConfiguredModels = matchedNode?.models || connection?.providerSpecificData?.models || [];
+        const acpDefault = matchedNode?.defaultModel || connection?.providerSpecificData?.defaultModel;
+        const acpModelsList = (Array.isArray(acpConfiguredModels) && acpConfiguredModels.length > 0)
+          ? acpConfiguredModels
+          : (acpDefault ? [acpDefault] : []);
+        const acpModels = acpModelsList.map((m) => {
+          const mId = typeof m === "string" ? m : (m.id || m.name);
+          const mName = typeof m === "string" ? m : (m.name || m.id);
+          return {
+            id: mId,
+            name: mName,
+            value: `${nodePrefix}/${mId}`,
+            isCustom: true,
+          };
+        });
+
         const seen = new Set(nodeModels.map((m) => m.value));
-        const mergedModels = [...nodeModels, ...registeredCustom.filter((m) => !seen.has(m.value))];
+        const mergedModels = [
+          ...nodeModels,
+          ...registeredCustom.filter((m) => !seen.has(m.value)),
+          ...acpModels.filter((m) => !seen.has(m.value)),
+        ];
 
         // Always show compatible providers that are connected, even with no aliases.
         // When no aliases exist, show a placeholder so users know it's available.

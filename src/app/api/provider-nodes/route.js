@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { createProviderNode, getProviderNodes } from "@/models";
-import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "@/shared/constants/providers";
+import { createProviderNode, getProviderNodes, createProviderConnection } from "@/models";
+import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX, ACP_PROVIDER_PREFIX } from "@/shared/constants/providers";
 import { generateId } from "@/shared/utils";
 
 export const dynamic = "force-dynamic";
@@ -93,6 +93,64 @@ export async function POST(request) {
         baseUrl: sanitizedBaseUrl,
         name: name.trim(),
       });
+      return NextResponse.json({ node }, { status: 201 });
+    }
+
+    if (nodeType === "acp") {
+      const command = (body.command || "").trim();
+      if (!command) {
+        return NextResponse.json({ error: "Command is required for ACP provider" }, { status: 400 });
+      }
+
+      let parsedArgs = [];
+      if (Array.isArray(body.args)) {
+        parsedArgs = body.args.map((a) => String(a).trim()).filter(Boolean);
+      } else if (typeof body.args === "string" && body.args.trim()) {
+        parsedArgs = body.args.trim().split(/\s+/).filter(Boolean);
+      }
+
+      const defaultModel = (body.defaultModel || body.defaultConfigOptions?.model || "").trim();
+      const models = Array.isArray(body.models) && body.models.length > 0
+        ? body.models
+        : (defaultModel ? [{ id: defaultModel, name: defaultModel }] : []);
+      const stripSystemPrompt = body.stripSystemPrompt !== undefined ? (body.stripSystemPrompt === true || body.stripSystemPrompt === "true") : true;
+
+      const node = await createProviderNode({
+        id: `${ACP_PROVIDER_PREFIX}${generateId()}`,
+        type: "acp",
+        prefix: prefix.trim(),
+        name: name.trim(),
+        command,
+        args: parsedArgs,
+        env: body.env && typeof body.env === "object" ? body.env : {},
+        defaultConfigOptions: body.defaultConfigOptions || (defaultModel ? { model: defaultModel } : {}),
+        models,
+        stripSystemPrompt,
+      });
+
+      // Auto-create initial connection for local ACP execution
+      try {
+        await createProviderConnection({
+          provider: node.id,
+          name: `${name.trim()} (ACP Stdio)`,
+          authType: "apikey",
+          apiKey: "acp-local",
+          isActive: true,
+          testStatus: "active",
+          providerSpecificData: {
+            command: node.command,
+            args: node.args,
+            env: node.env,
+            defaultConfigOptions: node.defaultConfigOptions,
+            prefix: node.prefix,
+            nodeName: node.name,
+            stripSystemPrompt,
+          },
+        });
+      } catch (connErr) {
+        console.log("Error creating initial ACP connection:", connErr);
+      }
+
       return NextResponse.json({ node }, { status: 201 });
     }
 

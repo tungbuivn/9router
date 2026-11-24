@@ -139,6 +139,9 @@ export function getTargetFormat(provider, credentials = null) {
   if (isAnthropicCompatible(provider)) {
     return "claude";
   }
+  if (typeof provider === "string" && provider.startsWith("acp-")) {
+    return "openai";
+  }
   const config = getProviderConfig(provider, credentials);
   return config.format || "openai";
 }

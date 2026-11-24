@@ -10,6 +10,7 @@ import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { unwrapClineEnvelope } from "../../shared/clineEnvelope.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
+import { updateRequestLogStage } from "@/lib/requestFileLogger.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
@@ -234,7 +235,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 /**
  * Handle non-streaming response from provider.
  */
-export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log }) {
+export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, requestLogId, triggerW2Sync }) {
   trackDone();
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
@@ -244,6 +245,9 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      if (requestLogId) {
+        updateRequestLogStage(requestLogId, "response", { type: "json", statusCode: HTTP_STATUS.BAD_GATEWAY, error: "Invalid SSE response for non-streaming request" }, { status: "error", statusCode: HTTP_STATUS.BAD_GATEWAY, latency: { ttft: Date.now() - requestStartTime, total: Date.now() - requestStartTime } }).catch(() => {});
+      }
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     }
     if (parsed.error) {
@@ -252,6 +256,9 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
         ? upstreamStatus
         : HTTP_STATUS.BAD_GATEWAY;
       appendLog({ status: `FAILED ${status}` });
+      if (requestLogId) {
+        updateRequestLogStage(requestLogId, "response", { type: "json", statusCode: status, error: parsed.error.message || "Upstream SSE stream failed", providerResponse: parsed }, { status: "error", statusCode: status, latency: { ttft: Date.now() - requestStartTime, total: Date.now() - requestStartTime } }).catch(() => {});
+      }
       return createErrorResult(status, parsed.error.message || "Upstream SSE stream failed");
     }
     responseBody = parsed;
@@ -260,6 +267,9 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       responseBody = await providerResponse.json();
     } catch (err) {
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      if (requestLogId) {
+        updateRequestLogStage(requestLogId, "response", { type: "json", statusCode: HTTP_STATUS.BAD_GATEWAY, error: `Invalid JSON response from ${provider}` }, { status: "error", statusCode: HTTP_STATUS.BAD_GATEWAY, latency: { ttft: Date.now() - requestStartTime, total: Date.now() - requestStartTime } }).catch(() => {});
+      }
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
     }
@@ -336,7 +346,34 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
 
   reqLogger.logConvertedResponse(translatedResponse);
 
+  const finalClientResponse = restoreToolNames(translatedResponse, toolNameMap);
   const totalLatency = Date.now() - requestStartTime;
+
+  if (requestLogId) {
+    updateRequestLogStage(
+      requestLogId,
+      "response",
+      {
+        type: "json",
+        statusCode: 200,
+        content: finalClientResponse?.choices?.[0]?.message?.content ?? finalClientResponse?.content ?? null,
+        thinking: finalClientResponse?.choices?.[0]?.message?.reasoning_content ?? finalClientResponse?.reasoning_content ?? null,
+        finishReason: finalClientResponse?.choices?.[0]?.finish_reason || finalClientResponse?.stop_reason || finalClientResponse?.status || "stop",
+        usage: usage || { prompt_tokens: 0, completion_tokens: 0 },
+        providerResponse: responseBody || null,
+        clientResponse: finalClientResponse || null,
+        error: null,
+      },
+      {
+        status: "success",
+        statusCode: 200,
+        latency: { ttft: totalLatency, total: totalLatency },
+        tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
+      }
+    ).catch(() => {});
+  }
+  triggerW2Sync?.();
+
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
     latency: { ttft: totalLatency, total: totalLatency },
@@ -357,7 +394,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
 
   return {
     success: true,
-    response: new Response(JSON.stringify(restoreToolNames(translatedResponse, toolNameMap)), {
+    response: new Response(JSON.stringify(finalClientResponse), {
       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", ...upstreamResponseHeaders(providerResponse.headers) }
     })
   };

@@ -35,6 +35,7 @@ import WindsurfExecutor from "./windsurf.js";
 import { DefaultExecutor } from "./default.js";
 import { MinimaxCodeExecutor } from "./minimax-code.js";
 import { DevinCliExecutor } from "./devin-cli.js";
+import { AcpExecutor } from "./acp.js";
 
 const executors = {
   antigravity: new AntigravityExecutor(),
@@ -93,6 +94,10 @@ const defaultCache = new Map();
 
 export function getExecutor(provider) {
   if (executors[provider]) return executors[provider];
+  if (typeof provider === "string" && provider.startsWith("acp-")) {
+    if (!defaultCache.has(provider)) defaultCache.set(provider, new AcpExecutor(provider));
+    return defaultCache.get(provider);
+  }
   if (!defaultCache.has(provider)) defaultCache.set(provider, new DefaultExecutor(provider));
   return defaultCache.get(provider);
 }

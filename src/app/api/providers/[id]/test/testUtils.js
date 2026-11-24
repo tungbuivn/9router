@@ -1,7 +1,7 @@
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { testProxyUrl } from "@/lib/network/proxyTest";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isAcpProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { ANTIGRAVITY_IDE_USER_AGENT } from "open-sse/providers/shared.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
@@ -524,6 +524,79 @@ async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null
 }
 
 async function testApiKeyConnection(connection, effectiveProxy = null) {
+  if (isAcpProvider(connection.provider)) {
+    const command = connection.providerSpecificData?.command;
+    const args = connection.providerSpecificData?.args || [];
+    const env = connection.providerSpecificData?.env || {};
+    if (!command?.trim()) return { valid: false, error: "Missing command" };
+    try {
+      const { spawn } = await import("child_process");
+      const parsedArgs = Array.isArray(args) ? args : (typeof args === "string" ? args.trim().split(/\s+/).filter(Boolean) : []);
+      const result = await new Promise((resolve) => {
+        let child;
+        const timeout = setTimeout(() => {
+          try { if (child && !child.killed) child.kill("SIGTERM"); } catch {}
+          resolve({ valid: false, error: "Timeout waiting for ACP handshake (5s)" });
+        }, 5000);
+
+        try {
+          child = spawn(command.trim(), parsedArgs, {
+            env: { ...process.env, ...env },
+            stdio: ["pipe", "pipe", "pipe"],
+            shell: process.platform === "win32",
+          });
+        } catch (spawnErr) {
+          clearTimeout(timeout);
+          return resolve({ valid: false, error: `Spawn error: ${spawnErr.message}` });
+        }
+
+        let buffer = "";
+        let answered = false;
+
+        child.on("error", (err) => {
+          clearTimeout(timeout);
+          if (!answered) {
+            answered = true;
+            resolve({ valid: false, error: `Process error: ${err.message}` });
+          }
+        });
+
+        child.stdout.on("data", (chunk) => {
+          buffer += chunk.toString("utf8");
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line.trim());
+              if (msg.result?.protocolVersion !== undefined || msg.result?.agentInfo || msg.result?.agentCapabilities) {
+                clearTimeout(timeout);
+                answered = true;
+                try { child.kill("SIGTERM"); } catch {}
+                return resolve({ valid: true });
+              }
+            } catch {}
+          }
+        });
+
+        const initReq = JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: 1,
+            clientInfo: { name: "9router-tester", version: "1.0.0" },
+            capabilities: {},
+          },
+        }) + "\n";
+        child.stdin.write(initReq);
+      });
+      return result;
+    } catch (err) {
+      return { valid: false, error: err.message };
+    }
+  }
+
   if (isOpenAICompatibleProvider(connection.provider)) {
     const modelsBase = connection.providerSpecificData?.baseUrl;
     if (!modelsBase) return { valid: false, error: "Missing base URL" };

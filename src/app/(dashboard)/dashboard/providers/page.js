@@ -18,6 +18,8 @@ import {
   WEB_COOKIE_PROVIDERS,
   OPENAI_COMPATIBLE_PREFIX,
   ANTHROPIC_COMPATIBLE_PREFIX,
+  ACP_PROVIDER_PREFIX,
+  isAcpProvider,
 } from "@/shared/constants/providers";
 import Link from "next/link";
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
@@ -25,6 +27,7 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 import AddCompatibleModal from "./components/AddCompatibleModal";
+import AddAcpModal from "./components/AddAcpModal";
 import { STATUS_FILTER_OPTIONS, matchesStatusFilter } from "./utils";
 
 function getStatusDisplay(connected, error, errorCode) {
@@ -104,6 +107,7 @@ export default function ProvidersPage() {
   const [showAddCompatibleModal, setShowAddCompatibleModal] = useState(false);
   const [showAddAnthropicCompatibleModal, setShowAddAnthropicCompatibleModal] =
     useState(false);
+  const [showAddAcpModal, setShowAddAcpModal] = useState(false);
   const [testingMode, setTestingMode] = useState(null);
   const [testResults, setTestResults] = useState(null);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -288,6 +292,21 @@ export default function ProvidersPage() {
       (p) => matchSearch(p.name) && matchStatus(getProviderStats(p.id, "apikey")),
     );
 
+  const acpProviders = providerNodes
+    .filter((node) => node.type === "acp")
+    .map((node) => ({
+      id: node.id,
+      name: node.name || "ACP Server",
+      color: "#8B5CF6",
+      textIcon: "ACP",
+      type: "acp",
+      command: node.command,
+      args: node.args,
+    }))
+    .filter(
+      (p) => matchSearch(p.name) && matchStatus(getProviderStats(p.id, "apikey")),
+    );
+
   // Dual-auth providers (oauth + apikey) store API keys as authType "apikey"
   // (and sometimes "api_key"). Card stats must count both so totals match detail.
   // kiro has no authModes in registry but accepts both (headless uses "api_key").
@@ -400,7 +419,8 @@ export default function ProvidersPage() {
     apikeyEntries.length > 0 ||
     webCookieEntries.length > 0 ||
     compatibleProviders.length > 0 ||
-    anthropicCompatibleProviders.length > 0;
+    anthropicCompatibleProviders.length > 0 ||
+    acpProviders.length > 0;
 
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
@@ -430,13 +450,21 @@ export default function ProvidersPage() {
         </div>
       )}
 
-      {/* Custom Providers (OpenAI/Anthropic Compatible) — dynamic */}
+      {/* Custom & ACP Providers (OpenAI/Anthropic/ACP) — dynamic */}
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
-            Custom Providers (OpenAI/Anthropic Compatible){" "}
+            Custom & ACP Providers{" "}
           </h2>
           <div className="grid grid-cols-1 gap-2 sm:flex sm:w-auto">
+            <Button
+              size="sm"
+              icon="smart_toy"
+              onClick={() => setShowAddAcpModal(true)}
+              className="w-full sm:w-auto !bg-purple-600 hover:!bg-purple-700 !text-white"
+            >
+              Add ACP Server
+            </Button>
             <Button
               size="sm"
               icon="add"
@@ -457,14 +485,15 @@ export default function ProvidersPage() {
           </div>
         </div>
         {compatibleProviders.length === 0 &&
-        anthropicCompatibleProviders.length === 0 ? (
+        anthropicCompatibleProviders.length === 0 &&
+        acpProviders.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-2 border border-dashed border-border rounded-xl text-text-muted text-sm">
             <span className="material-symbols-outlined text-[18px]">extension</span>
-            <span>No custom providers — use buttons above to add OpenAI/Anthropic compatible endpoints</span>
+            <span>No custom or ACP providers — use buttons above to add OpenAI/Anthropic compatible or ACP stdio servers</span>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-            {[...compatibleProviders, ...anthropicCompatibleProviders].map(
+            {[...compatibleProviders, ...anthropicCompatibleProviders, ...acpProviders].map(
               (info) => (
                 <ApiKeyProviderCard
                   key={info.id}
@@ -668,6 +697,17 @@ export default function ProvidersPage() {
           setShowAddAnthropicCompatibleModal(false);
         }}
       />
+      <AddAcpModal
+        isOpen={showAddAcpModal}
+        onClose={() => setShowAddAcpModal(false)}
+        onCreated={(node) => {
+          setProviderNodes((prev) => [...prev, node]);
+          setShowAddAcpModal(false);
+          fetch("/api/providers").then(r => r.json()).then(d => {
+            if (d.connections) setConnections(d.connections);
+          }).catch(() => {});
+        }}
+      />
 
       {/* Test Results Modal */}
       {testResults && (
@@ -822,21 +862,25 @@ function ApiKeyProviderCard({
   const isAnthropicCompatible = providerId.startsWith(
     ANTHROPIC_COMPATIBLE_PREFIX,
   );
+  const isAcp = providerId.startsWith(ACP_PROVIDER_PREFIX) || provider.type === "acp";
 
   const dotColors = {
     free: "bg-green-500",
     oauth: "bg-blue-500",
     apikey: "bg-amber-500",
     compatible: "bg-orange-500",
+    acp: "bg-purple-500",
   };
   const dotLabels = {
     free: "Free",
     oauth: "OAuth",
     apikey: "API Key",
     compatible: "Compatible",
+    acp: "ACP",
   };
 
   const getIconPath = () => {
+    if (isAcp) return "/providers/acp.png";
     if (isCompatible && provider.apiType)
       return provider.apiType === "responses"
         ? "/providers/oai-r.png"
@@ -865,9 +909,9 @@ function ApiKeyProviderCard({
                 size={30}
                 className="object-contain rounded-lg max-w-[30px] max-h-[30px]"
                 fallbackText={
-                  provider.textIcon || provider.id.slice(0, 2).toUpperCase()
+                  provider.textIcon || (isAcp ? "ACP" : provider.id.slice(0, 2).toUpperCase())
                 }
-                fallbackColor={provider.color}
+                fallbackColor={provider.color || (isAcp ? "#8B5CF6" : undefined)}
               />
             </div>
             <div className="min-w-0">
@@ -895,6 +939,11 @@ function ApiKeyProviderCard({
                     {isAnthropicCompatible && (
                       <Badge variant="default" size="sm">
                         Messages
+                      </Badge>
+                    )}
+                    {isAcp && (
+                      <Badge variant="default" size="sm" className="!bg-purple-500/10 !text-purple-600 dark:!text-purple-400">
+                        ACP Stdio
                       </Badge>
                     )}
                     {errorTime && (

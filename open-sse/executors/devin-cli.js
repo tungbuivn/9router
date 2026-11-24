@@ -24,6 +24,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { BaseExecutor } from "./base.js";
+import { buildAcpProcessEnv } from "../utils/w2Proxy.js";
 
 // ─── Binary discovery ────────────────────────────────────────────────────────
 
@@ -391,22 +392,23 @@ export class DevinCliExecutor extends BaseExecutor {
       mcpConfigDir = null;
     };
 
+    // Inherit the parent environment so devin resolves stored CLI credentials
+    // (~/.local/share/devin/credentials.toml from `devin auth login`). Do NOT
+    // inject WINDSURF_API_KEY: this provider is noAuth, and a bogus/leaked key
+    // overrides stored creds and makes devin return -32000 "invalid api key".
+    const devinBaseEnv = { ...process.env };
+    // Auto-approve tool execution so the agent doesn't block waiting for a
+    // session/request_permission response we never send (default mode would
+    // hang the stream on the first shell/exec tool call). Override via env.
+    // WARNING: bypass lets the agent run shell/modify FS unattended — local only.
+    devinBaseEnv.DEVIN_PERMISSION_MODE = process.env.DEVIN_PERMISSION_MODE || "bypass";
+    if (mcpConfigDir) devinBaseEnv.XDG_CONFIG_HOME = mcpConfigDir;
+    const { env: devinSpawnEnv } = await buildAcpProcessEnv(devinBaseEnv, {});
+
     const sseStream = new ReadableStream({
       start(controller) {
         const enc = new TextEncoder();
         const emit = (data) => controller.enqueue(enc.encode(data));
-
-        // Inherit the parent environment so devin resolves stored CLI credentials
-        // (~/.local/share/devin/credentials.toml from `devin auth login`). Do NOT
-        // inject WINDSURF_API_KEY: this provider is noAuth, and a bogus/leaked key
-        // overrides stored creds and makes devin return -32000 "invalid api key".
-        const env = { ...process.env };
-        // Auto-approve tool execution so the agent doesn't block waiting for a
-        // session/request_permission response we never send (default mode would
-        // hang the stream on the first shell/exec tool call). Override via env.
-        // WARNING: bypass lets the agent run shell/modify FS unattended — local only.
-        env.DEVIN_PERMISSION_MODE = process.env.DEVIN_PERMISSION_MODE || "bypass";
-        if (mcpConfigDir) env.XDG_CONFIG_HOME = mcpConfigDir;
 
         // Agent type: default (omitted) = full agent with built-in tools
         // (fs/shell/search) so the model can actually perform tasks. Override to
@@ -421,7 +423,7 @@ export class DevinCliExecutor extends BaseExecutor {
         // file tools create/delete relative paths in the user's project.
         // MCP config still comes from XDG_CONFIG_HOME (throwaway), not project .devin/.
         const child = spawn(devinBin, acpArgs, {
-          env,
+          env: devinSpawnEnv,
           cwd: workspaceCwd,
           stdio: ["pipe", "pipe", "pipe"],
           // On Windows, devin.exe may need shell resolution

@@ -6,7 +6,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
 import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isAcpProvider, ACP_PROVIDER_PREFIX, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
@@ -20,6 +20,7 @@ import CompatibleModelsSection from "./CompatibleModelsSection";
 import ConnectionRow from "./ConnectionRow";
 import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
+import EditAcpNodeModal from "./EditAcpNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
@@ -65,6 +66,7 @@ export default function ProviderDetailPage() {
   const [showBulkImportGrokCli, setShowBulkImportGrokCli] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showEditNodeModal, setShowEditNodeModal] = useState(false);
+  const [showEditAcpModal, setShowEditAcpModal] = useState(false);
   const [showBulkProxyModal, setShowBulkProxyModal] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [modelAliases, setModelAliases] = useState({});
@@ -152,31 +154,70 @@ export default function ProviderDetailPage() {
     triggerApiKeyConnection();
   };
 
+  const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
+  const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
+  const isAcp = isAcpProvider(providerId) || providerNode?.type === "acp";
+  const isCompatible = isOpenAICompatible || isAnthropicCompatible || isAcp;
+
+  const fallbackInfo = isAcp
+    ? {
+        id: providerId,
+        name: "ACP Server",
+        color: "#8B5CF6",
+        textIcon: "ACP",
+        type: "acp",
+      }
+    : (isOpenAICompatible || isAnthropicCompatible
+        ? {
+            id: providerId,
+            name: isAnthropicCompatible ? "Anthropic Compatible" : "OpenAI Compatible",
+            color: isAnthropicCompatible ? "#D97757" : "#10A37F",
+            textIcon: isAnthropicCompatible ? "AC" : "OC",
+            type: isAnthropicCompatible ? "anthropic-compatible" : "openai-compatible",
+          }
+        : (OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || FREE_PROVIDERS[providerId] || FREE_TIER_PROVIDERS[providerId] || WEB_COOKIE_PROVIDERS[providerId] || {
+            id: providerId,
+            name: providerId,
+            color: "#666666",
+            textIcon: (providerId || "PR").slice(0, 2).toUpperCase(),
+          })
+      );
+
   const providerInfo = providerNode
     ? {
         id: providerNode.id,
-        name: providerNode.name || (providerNode.type === "anthropic-compatible" ? "Anthropic Compatible" : "OpenAI Compatible"),
-        color: providerNode.type === "anthropic-compatible" ? "#D97757" : "#10A37F",
-        textIcon: providerNode.type === "anthropic-compatible" ? "AC" : "OC",
+        name: providerNode.name || (isAcp ? "ACP Server" : providerNode.type === "anthropic-compatible" ? "Anthropic Compatible" : "OpenAI Compatible"),
+        color: isAcp ? "#8B5CF6" : providerNode.type === "anthropic-compatible" ? "#D97757" : "#10A37F",
+        textIcon: isAcp ? "ACP" : providerNode.type === "anthropic-compatible" ? "AC" : "OC",
         apiType: providerNode.apiType,
         baseUrl: providerNode.baseUrl,
         type: providerNode.type,
+        command: providerNode.command,
+        args: providerNode.args,
+        env: providerNode.env,
+        defaultConfigOptions: providerNode.defaultConfigOptions,
       }
-    : (OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || FREE_PROVIDERS[providerId] || FREE_TIER_PROVIDERS[providerId] || WEB_COOKIE_PROVIDERS[providerId]);
+    : fallbackInfo;
+
   const authModes = providerInfo?.authModes || [];
   const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
-  const staticModels = getModelsByProviderId(providerId);
-  const models = LIVE_MODEL_CATALOG_PROVIDERS.has(providerId) && liveModels.length > 0
-    ? liveModels
-    : applyQoderModelNames(staticModels, customModels, getProviderAlias(providerId));
-  const providerAlias = getProviderAlias(providerId);
-  
-  const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
-  const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
-  const isCompatible = isOpenAICompatible || isAnthropicCompatible;
   const hasDualAuthModes = !isCompatible && isOAuth && supportsApiKeyAuth;
+
+  const staticModels = getModelsByProviderId(providerId);
+  const acpConfiguredModels = (providerNode?.models || []).map((m) => ({
+    id: typeof m === "string" ? m : (m.id || m.name),
+    name: typeof m === "string" ? m : (m.name || m.id),
+  }));
+  const models = isAcp
+    ? (acpConfiguredModels.length > 0
+        ? acpConfiguredModels
+        : (providerNode?.defaultModel ? [{ id: providerNode.defaultModel, name: providerNode.defaultModel }] : []))
+    : (LIVE_MODEL_CATALOG_PROVIDERS.has(providerId) && liveModels.length > 0
+        ? liveModels
+        : applyQoderModelNames(staticModels, customModels, getProviderAlias(providerId)));
+  const providerAlias = getProviderAlias(providerId);
   const oauthConnectionLabel =
     providerId === "xai" ? "Grok Build OAuth"
     : providerId === "grok-cli" ? "Grok CLI Device Login"
@@ -215,7 +256,7 @@ export default function ProviderDetailPage() {
     return set.size ? ["auto", ...[...set]] : null;
   })();
   const providerDisplayAlias = isCompatible
-    ? (providerNode?.prefix || providerId)
+    ? (providerNode?.prefix || connections[0]?.providerSpecificData?.prefix || providerId)
     : providerAlias;
 
   const fetchDisabledModels = useCallback(async () => {
@@ -571,7 +612,7 @@ export default function ProviderDetailPage() {
 
   // `transport` pins a realtime STT dispatch marker (shared whitelist
   // STT_TRANSPORT_META); the API only honours it on type "stt" records.
-  const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias, caps, transport) => {
+  const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias, caps, transport, options = {}) => {
     try {
       const res = await fetch("/api/models/custom", {
         method: "POST",
@@ -579,11 +620,13 @@ export default function ProviderDetailPage() {
         body: JSON.stringify({ providerAlias: providerAliasOverride, id: modelId, type, ...(caps ? { caps } : {}), ...(transport ? { transport } : {}) }),
       });
       if (res.ok) {
-        await fetchCustomModels();
-        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+        if (!options.skipRefresh) {
+          await fetchCustomModels();
+          if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+        }
       } else {
         const data = await res.json();
-        alert(data.error || "Failed to add custom model");
+        if (!options.silent) alert(data.error || "Failed to add custom model");
       }
     } catch (error) {
       console.log("Error adding custom model:", error);
@@ -1199,10 +1242,16 @@ export default function ProviderDetailPage() {
           onCopy={copy}
           onSetAlias={handleSetAlias}
           onDeleteAlias={handleDeleteAlias}
-          onAddCustomModel={(modelId) => handleAddCustomModel(modelId, "llm", providerStorageAlias)}
+          onAddCustomModel={(modelId, options) => handleAddCustomModel(modelId, "llm", providerStorageAlias, undefined, undefined, options)}
+          onRefreshCustomModels={fetchCustomModels}
           onDeleteCustomModel={(modelId) => handleDeleteCustomModel(modelId, "llm", providerStorageAlias)}
+          disabledModelIds={disabledModelIds}
+          onDisableModel={handleDisableModel}
+          onEnableModel={handleEnableModel}
           connections={connections}
           isAnthropic={isAnthropicCompatible}
+          isAcp={isAcp}
+          nodeModels={providerNode?.models}
         />
       );
     }
@@ -1490,29 +1539,47 @@ export default function ProviderDetailPage() {
         <Card>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
-              <h2 className="text-lg font-semibold">{isAnthropicCompatible ? "Anthropic Compatible Details" : "OpenAI Compatible Details"}</h2>
+              <h2 className="text-lg font-semibold">
+                {isAcp
+                  ? "ACP Server Details"
+                  : isAnthropicCompatible
+                    ? "Anthropic Compatible Details"
+                    : "OpenAI Compatible Details"}
+              </h2>
               <p className="break-all text-sm text-text-muted">
-                {isAnthropicCompatible ? "Messages API" : (providerNode.apiType === "responses" ? "Responses API" : "Chat Completions")} · {(providerNode.baseUrl || "").replace(/\/$/, "")}/
-                {isAnthropicCompatible ? "messages" : (providerNode.apiType === "responses" ? "responses" : "chat/completions")}
+                {isAcp ? (
+                  <>
+                    <span className="font-mono text-xs">{providerNode.command} {Array.isArray(providerNode.args) ? providerNode.args.join(" ") : ""}</span>
+                    {providerNode.defaultConfigOptions?.model && (
+                      <span className="ml-2 font-mono text-[11px] text-purple-600 dark:text-purple-400">
+                        (model: {providerNode.defaultConfigOptions.model})
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  `${isAnthropicCompatible ? "Messages API" : (providerNode.apiType === "responses" ? "Responses API" : "Chat Completions")} · ${(providerNode.baseUrl || "").replace(/\/$/, "")}/${isAnthropicCompatible ? "messages" : (providerNode.apiType === "responses" ? "responses" : "chat/completions")}`
+                )}
               </p>
             </div>
             <div className="grid grid-cols-1 gap-2 sm:flex sm:items-center">
-              <Button
-                size="sm"
-                icon="add"
-                onClick={() => {
-                  setAddConnectionError("");
-                  setShowAddApiKeyModal(true);
-                }}
-                className="w-full sm:w-auto"
-              >
-                Add API Key
-              </Button>
+              {!isAcp && (
+                <Button
+                  size="sm"
+                  icon="add"
+                  onClick={() => {
+                    setAddConnectionError("");
+                    setShowAddApiKeyModal(true);
+                  }}
+                  className="w-full sm:w-auto"
+                >
+                  Add API Key
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="secondary"
                 icon="edit"
-                onClick={() => setShowEditNodeModal(true)}
+                onClick={() => (isAcp ? setShowEditAcpModal(true) : setShowEditNodeModal(true))}
                 className="w-full sm:w-auto"
               >
                 Edit
@@ -1523,8 +1590,8 @@ export default function ProviderDetailPage() {
                 icon="delete"
                 onClick={async () => {
                   setConfirmState({
-                    title: "Delete Compatible Node",
-                    message: `Delete this ${isAnthropicCompatible ? "Anthropic" : "OpenAI"} Compatible node?`,
+                    title: isAcp ? "Delete ACP Node" : "Delete Compatible Node",
+                    message: `Delete this ${isAcp ? "ACP" : isAnthropicCompatible ? "Anthropic" : "OpenAI"} provider node?`,
                     onConfirm: async () => {
                       setConfirmState(null);
                       try {
@@ -1671,13 +1738,15 @@ export default function ProviderDetailPage() {
                         {translate("Bulk Add")}
                       </Button>
                     )}
-                    <Button
-                      size="sm"
-                      icon="add"
-                      onClick={triggerAddConnection}
-                    >
-                      {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
-                    </Button>
+                    {!isAcp && (
+                      <Button
+                        size="sm"
+                        icon="add"
+                        onClick={triggerAddConnection}
+                      >
+                        {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
+                      </Button>
+                    )}
                   </>
                 )}
               </div>
@@ -1818,11 +1887,21 @@ export default function ProviderDetailPage() {
               </select>
             )}
           </div>
-          {!isCompatible && (() => {
-            const allIds = [
-              ...models,
-              ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
-            ].filter((m) => { const k = getModelKind(m); return !k || k === "llm"; }).map((m) => m.id);
+          {(() => {
+            const allIds = isCompatible
+              ? Array.from(new Set([
+                  ...getProviderCustomModelRows({
+                    customModels,
+                    modelAliases,
+                    providerAlias: providerStorageAlias,
+                    type: "llm",
+                  }).map((m) => m.id),
+                  ...(providerNode?.models || []).map((m) => (typeof m === "string" ? m : (m.id || m.name))).filter(Boolean),
+                ]))
+              : [
+                  ...models,
+                  ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
+                ].filter((m) => { const k = getModelKind(m); return !k || k === "llm"; }).map((m) => m.id);
             const activeIds = allIds.filter((id) => !disabledModelIds.includes(id));
             return (
               <div className="flex gap-2">
@@ -1954,13 +2033,21 @@ export default function ProviderDetailPage() {
         onSave={handleUpdateConnection}
         onClose={() => setShowEditModal(false)}
       />
-      {isCompatible && (
+      {isCompatible && !isAcp && (
         <EditCompatibleNodeModal
           isOpen={showEditNodeModal}
           node={providerNode}
           onSave={handleUpdateNode}
           onClose={() => setShowEditNodeModal(false)}
           isAnthropic={isAnthropicCompatible}
+        />
+      )}
+      {isAcp && (
+        <EditAcpNodeModal
+          isOpen={showEditAcpModal}
+          node={providerNode}
+          onSave={handleUpdateNode}
+          onClose={() => setShowEditAcpModal(false)}
         />
       )}
       {!isCompatible && (

@@ -48,6 +48,12 @@ export default function TokenSaverClient() {
   const [customPromptEnabled, setCustomPromptEnabled] = useState(false);
   const [customPrompt, setCustomPrompt] = useState("");
   const [reaAllowEnabled, setReaAllowEnabled] = useState(false);
+  const [skillsOptimizerMode, setSkillsOptimizerMode] = useState("off");
+  const [skillsData, setSkillsData] = useState(null);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsBusy, setSkillsBusy] = useState(false);
+  const [skillsSearch, setSkillsSearch] = useState("");
+  const [skillsError, setSkillsError] = useState("");
   const [pxpipeEnabled, setPxpipeEnabled] = useState(false);
   const [pxpipeMinChars, setPxpipeMinChars] = useState(25000);
   const [pxpipeStatus, setPxpipeStatus] = useState({
@@ -371,6 +377,46 @@ export default function TokenSaverClient() {
     patchSetting({ reaAllowEnabled: value });
   };
 
+  const handleSkillsOptimizerMode = (mode) => {
+    setSkillsOptimizerMode(mode);
+    patchSetting({ skillsOptimizerMode: mode });
+  };
+
+  const refreshSkills = useCallback(async () => {
+    setSkillsLoading(true);
+    setSkillsError("");
+    try {
+      const res = await fetch("/api/skills", { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to load skills");
+      setSkillsData(data);
+    } catch (err) {
+      setSkillsError(err?.message || "Failed to load local skills");
+    } finally {
+      setSkillsLoading(false);
+    }
+  }, []);
+
+  const runSkillAction = async (payload) => {
+    setSkillsBusy(true);
+    setSkillsError("");
+    try {
+      const res = await fetch("/api/skills", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to update skills");
+      if (data?.state) setSkillsData(data.state);
+      else await refreshSkills();
+    } catch (err) {
+      setSkillsError(err?.message || "Skill update failed");
+    } finally {
+      setSkillsBusy(false);
+    }
+  };
+
   const refreshPxpipeStatus = useCallback(async () => {
     setPxpipeStatus((s) => ({ ...s, loading: true }));
     try {
@@ -450,16 +496,18 @@ export default function TokenSaverClient() {
           setCustomPromptEnabled(!!data.customPromptEnabled);
           setCustomPrompt(data.customPrompt || "");
           setReaAllowEnabled(!!data.reaAllowEnabled);
+          setSkillsOptimizerMode(data.skillsOptimizerMode || "off");
           setPxpipeEnabled(!!data.pxpipeEnabled);
           if (typeof data.pxpipeMinChars === "number") setPxpipeMinChars(data.pxpipeMinChars);
           refreshHeadroomStatus();
+          refreshSkills();
           // PRD: run the PXPIPE health check automatically when the page opens
           refreshPxpipeStatus().then(runPxpipeHealth);
         }
       } catch {}
     };
     loadSettings();
-  }, [refreshHeadroomStatus, refreshPxpipeStatus, runPxpipeHealth]);
+  }, [refreshHeadroomStatus, refreshPxpipeStatus, runPxpipeHealth, refreshSkills]);
 
   const headroomRunning = !!headroomStatus.running;
   const headroomStatusLabel = headroomStatus.loading
@@ -816,6 +864,44 @@ export default function TokenSaverClient() {
             onChange={() => handleReaAllowEnabled(!reaAllowEnabled)}
           />
         </div>
+        <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">
+              Skills prompt optimizer{" "}
+              <span className="text-xs font-normal text-primary">
+                (&lt;available_skills&gt;)
+              </span>
+            </p>
+            <p className="text-sm text-text-muted">
+              Shrinks verbose skill descriptions in system prompts sent through 9Router.{" "}
+              {skillsOptimizerMode === "compact"
+                ? "Compact keeps all skill names & paths (~80% smaller, prompt-cache stable)."
+                : skillsOptimizerMode === "on-demand"
+                  ? "On-Demand sends full descriptions only when tagged (@name / /name) in chat (~92% smaller)."
+                  : "Off sends full skill descriptions as provided by the client."}
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {[
+              { id: "off", label: "Off" },
+              { id: "compact", label: "Compact" },
+              { id: "on-demand", label: "On-Demand" },
+            ].map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => handleSkillsOptimizerMode(m.id)}
+                className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
+                  skillsOptimizerMode === m.id
+                    ? "bg-primary text-white border-primary"
+                    : "bg-transparent border-border text-text-muted hover:bg-surface-2"
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
         {/* PXPIPE hidden from UI — experimental, not exposed to users yet */}
         {false && (
         <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
@@ -861,6 +947,164 @@ export default function TokenSaverClient() {
             onChange={() => handlePxpipeEnabled(!pxpipeEnabled)}
           />
         </div>
+        )}
+      </Card>
+
+      <Card id="local-skills">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div>
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <span className="material-symbols-outlined text-primary">
+                extension
+              </span>
+              Global Skills Manager
+            </h2>
+            <p className="text-xs text-text-muted mt-0.5">
+              Quickly toggle skills between{" "}
+              <code>~/.agents/skills</code> (active) and{" "}
+              <code>~/.agents/skills-disabled</code> (on-demand via{" "}
+              <code>skill-catalog</code> or <code>@path</code>). Terminal CLI:{" "}
+              <code>sk list · sk on &lt;name&gt; · sk off &lt;name&gt; · sk core</code>
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={skillsBusy}
+              onClick={() => runSkillAction({ action: "preset", preset: "core" })}
+            >
+              Core Only
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={skillsBusy}
+              onClick={() => runSkillAction({ action: "preset", preset: "none" })}
+            >
+              Catalog Only
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={skillsBusy}
+              onClick={() => runSkillAction({ action: "preset", preset: "all" })}
+            >
+              Enable All
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              icon="refresh"
+              disabled={skillsLoading || skillsBusy}
+              onClick={refreshSkills}
+            >
+              Refresh
+            </Button>
+          </div>
+        </div>
+
+        {skillsError && (
+          <div className="mb-3 p-2.5 rounded border border-error/40 bg-error/10 text-xs text-error">
+            {skillsError}
+          </div>
+        )}
+
+        {skillsData && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2 py-1 rounded bg-success/15 text-success font-medium">
+                  {skillsData.enabledCount} enabled
+                </span>
+                <span className="px-2 py-1 rounded bg-surface-2 text-text-muted font-medium">
+                  {skillsData.disabledCount} disabled
+                </span>
+                <span className="px-2 py-1 rounded bg-primary/10 text-primary font-mono">
+                  Active prompt: {(skillsData.activePromptBytes / 1024).toFixed(1)} KB /{" "}
+                  {(skillsData.allSkillsPromptBytes / 1024).toFixed(1)} KB
+                  {skillsData.savedBytes > 0
+                    ? ` (saved ${(skillsData.savedBytes / 1024).toFixed(1)} KB)`
+                    : ""}
+                </span>
+                {skillsData.catalogEnabled && (
+                  <span className="px-2 py-1 rounded bg-warning/15 text-warning font-mono">
+                    skill-catalog ON ({(skillsData.catalogPromptBytes / 1024).toFixed(1)} KB)
+                  </span>
+                )}
+              </div>
+              <input
+                type="text"
+                value={skillsSearch}
+                onChange={(e) => setSkillsSearch(e.target.value)}
+                placeholder="Filter skills..."
+                className="h-7 px-2.5 rounded border border-border bg-transparent text-xs focus:outline-none focus:border-primary"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-[380px] overflow-y-auto pr-1 custom-scrollbar">
+              {(skillsData.skills || [])
+                .filter((s) => !s.isCatalog && s.hasSkillMd)
+                .filter((s) => {
+                  const q = skillsSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    s.name.toLowerCase().includes(q) ||
+                    s.group.toLowerCase().includes(q) ||
+                    (s.description || "").toLowerCase().includes(q)
+                  );
+                })
+                .map((s) => (
+                  <div
+                    key={s.name}
+                    className={`flex items-start justify-between gap-3 p-2.5 rounded-lg border transition-colors ${
+                      s.enabled
+                        ? "border-primary/30 bg-primary/[0.03]"
+                        : "border-border bg-surface-2/20 opacity-80"
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-xs font-semibold font-mono truncate">
+                          {s.name}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-text-muted font-mono">
+                          {s.group}
+                        </span>
+                        <span className="text-[10px] font-mono text-text-muted">
+                          {(s.approxPromptBytes / 1024).toFixed(1)}KB
+                        </span>
+                      </div>
+                      {s.description && (
+                        <p className="text-[11px] text-text-muted line-clamp-2 mt-1">
+                          {s.description}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => copy(`@${s.location}`)}
+                        className="mt-1 text-[10px] text-primary hover:underline font-mono"
+                        title="Copy @path to tag this skill directly into chat"
+                      >
+                        Copy @SKILL.md tag
+                      </button>
+                    </div>
+                    <Toggle
+                      size="sm"
+                      checked={s.enabled}
+                      disabled={skillsBusy}
+                      onChange={() =>
+                        runSkillAction({
+                          action: "toggle",
+                          name: s.name,
+                          enabled: !s.enabled,
+                        })
+                      }
+                    />
+                  </div>
+                ))}
+            </div>
+          </div>
         )}
       </Card>
 

@@ -10,6 +10,7 @@ import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
 import { initTranslators } from "open-sse/translator/index.js";
 import { getKeyAccessContext, enforceKeyAccessResolved } from "@/sse/services/keyAccess.js";
+import { withApiRequestLog } from "@/lib/withApiRequestLog.js";
 
 let initialized = false;
 const GEMINI_NATIVE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -86,7 +87,16 @@ export async function POST(request, { params }) {
     const body = await request.json();
 
     if (isGeminiNativeTtsRequest(model, body)) {
-      return await forwardGeminiNativeRequest(request, body, model, action);
+      const loggedTts = withApiRequestLog(
+        () => forwardGeminiNativeRequest(request, body, model, action),
+        { apiType: "audio", syncW2: true, extractModel: () => model }
+      );
+      const ttsReq = new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify(body),
+      });
+      return await loggedTts(ttsReq);
     }
 
     // Streaming is determined by URL action suffix:
@@ -97,14 +107,18 @@ export async function POST(request, { params }) {
     // Convert Gemini request format to OpenAI/internal format
     const convertedBody = convertGeminiToInternal(body, model, stream);
 
-    // Create new request with converted body
+    // Create new request with converted body, passing raw Gemini payload as clientRawRequest
     const newRequest = new Request(request.url, {
       method: "POST",
       headers: request.headers,
       body: JSON.stringify(convertedBody),
     });
 
-    const response = await handleChat(newRequest);
+    const response = await handleChat(newRequest, {
+      endpoint: new URL(request.url).pathname,
+      body,
+      headers: Object.fromEntries(request.headers.entries()),
+    });
 
     if (stream) {
       // Transform OpenAI SSE => Gemini SSE on the fly.

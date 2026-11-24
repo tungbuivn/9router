@@ -8,19 +8,38 @@ import { rememberEndpoint } from "./cliEndpointPresets";
 import ApiKeySelect from "./ApiKeySelect";
 import { matchKnownEndpoint } from "./cliEndpointMatch";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
+import { useModelCaps } from "@/shared/hooks/useModelCaps";
 
 const CLOUD_URL = process.env.NEXT_PUBLIC_CLOUD_URL;
 
-// Auto-compact window presets (CLAUDE_CODE_AUTO_COMPACT_WINDOW, valid 100K–1M).
+// Auto-compact window presets (CLAUDE_CODE_AUTO_COMPACT_WINDOW, valid 32K–1M).
 // UI shows the round number; the value written is nudged down 2K to stay safely
 // under the upstream hard cap.
-const CONTEXT_OPTIONS = [
+const FIXED_CONTEXT_OPTIONS = [
   { label: "Default", value: "" },
+  { label: "32K", value: "30000" },
+  { label: "40K", value: "38000" },
+  { label: "64K", value: "60000" },
+  { label: "100K", value: "98000" },
+  { label: "128K", value: "124000" },
   { label: "200K", value: "198000" },
   { label: "300K", value: "298000" },
   { label: "500K", value: "498000" },
   { label: "700K", value: "698000" },
 ];
+
+const fmtContext = (tokens) => {
+  if (!tokens || typeof tokens !== "number") return null;
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000;
+    return Number.isInteger(m) ? `${m}M` : `${m.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) {
+    const k = Math.round(tokens / 1_000);
+    return `${k}k`;
+  }
+  return `${tokens}`;
+};
 
 // Claude Code assumes a model's window is 200K unless the name carries the `[1m]`
 // marker, which is why the 1M auto-compact preset only takes effect once the
@@ -43,6 +62,7 @@ export default function ClaudeToolCard({
   tailscaleEnabled,
   tailscaleUrl,
 }) {
+  const { getCaps } = useModelCaps();
   const [claudeStatus, setClaudeStatus] = useState(initialStatus || null);
   const [checkingClaude, setCheckingClaude] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -59,7 +79,26 @@ export default function ClaudeToolCard({
   const [exaMcpEnabled, setExaMcpEnabled] = useState(false);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [oneMContext, setOneMContext] = useState(false);
+  const [maxContextTokens, setMaxContextTokens] = useState("");
+  const [compactMode, setCompactMode] = useState("percent"); // "percent" | "fixed" | "default"
+  const [compactPct, setCompactPct] = useState("80");
+  const [disableUnknownModelEnforcement, setDisableUnknownModelEnforcement] = useState(true);
+  const [enableGatewayDiscovery, setEnableGatewayDiscovery] = useState(true);
   const hasInitializedModels = useRef(false);
+  const hasUserEditedMaxContext = useRef(false);
+
+  // Sonnet is Claude Code's primary default model; fallback to opus, fable, or haiku
+  const primaryModelMapping = modelMappings["sonnet"] || modelMappings["opus"] || modelMappings["fable"] || modelMappings["haiku"] || "";
+  const cleanPrimaryModel = primaryModelMapping ? stripModelContextMarker(primaryModelMapping).model : "";
+  const primaryCaps = cleanPrimaryModel ? getCaps(cleanPrimaryModel) : null;
+  const detectedPrimaryContext = primaryCaps?.contextWindow || null;
+
+  // Auto-fill maxContextTokens on initial load or model change if user hasn't typed custom tokens
+  useEffect(() => {
+    if (!hasUserEditedMaxContext.current && detectedPrimaryContext && !maxContextTokens) {
+      setMaxContextTokens(String(detectedPrimaryContext));
+    }
+  }, [detectedPrimaryContext, maxContextTokens]);
 
   // Claude Code only string-matches the marker against the model name, so it
   // applies to any id — the user decides which models are worth declaring as 1M.
@@ -77,6 +116,11 @@ export default function ClaudeToolCard({
       const current = modelMappings[model.alias];
       if (current) onModelMappingChange(model.alias, withContextMarker(current, enabled));
     });
+    if (enabled) {
+      setMaxContextTokens("1000000");
+    } else if (detectedPrimaryContext) {
+      setMaxContextTokens(String(detectedPrimaryContext));
+    }
   };
 
   const currentBaseUrl = claudeStatus?.settings?.env?.ANTHROPIC_BASE_URL || "";
@@ -105,9 +149,41 @@ export default function ClaudeToolCard({
   }, [initialStatus]);
 
   useEffect(() => {
-    const v = claudeStatus?.settings?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
-    setAutoCompactWindow(v || "");
-  }, [claudeStatus?.settings?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW]);
+    const env = claudeStatus?.settings?.env;
+    if (!env) return;
+
+    if (env.CLAUDE_CODE_MAX_CONTEXT_TOKENS) {
+      setMaxContextTokens(String(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS));
+      hasUserEditedMaxContext.current = true;
+    }
+
+    if (env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) {
+      setCompactMode("percent");
+      setCompactPct(String(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE));
+    } else if (env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) {
+      setCompactMode("fixed");
+      setAutoCompactWindow(String(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW));
+    } else if (claudeStatus?.settings?.autoCompactWindow) {
+      setCompactMode("fixed");
+      setAutoCompactWindow(String(claudeStatus.settings.autoCompactWindow));
+    }
+
+    if (env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT !== undefined) {
+      setDisableUnknownModelEnforcement(
+        env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT === "1" ||
+        env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT === true ||
+        env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT === "true"
+      );
+    }
+
+    if (env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY !== undefined) {
+      setEnableGatewayDiscovery(
+        env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1" ||
+        env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === true ||
+        env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "true"
+      );
+    }
+  }, [claudeStatus]);
 
   useEffect(() => {
     const env = claudeStatus?.settings?.env;
@@ -217,20 +293,61 @@ export default function ClaudeToolCard({
         // toggle already decided the marker when it was flipped.
         if (targetModel && model.envKey) env[model.envKey] = targetModel;
       });
-      if (autoCompactWindow) {
-        env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = autoCompactWindow;
+
+      if (maxContextTokens && Number(maxContextTokens) > 0) {
+        env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(maxContextTokens);
       }
+
+      if (compactMode === "percent" && compactPct) {
+        env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(compactPct);
+      } else if (compactMode === "fixed" && autoCompactWindow) {
+        env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(autoCompactWindow);
+      }
+
+      if (disableUnknownModelEnforcement) {
+        env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT = "1";
+      }
+
+      if (enableGatewayDiscovery) {
+        env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+      }
+
       const res = await fetch("/api/cli-tools/claude-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ env, exaMcpEnabled, autoCompactWindow }),
+        body: JSON.stringify({
+          env,
+          exaMcpEnabled,
+          autoCompactWindow: compactMode === "fixed" ? autoCompactWindow : "",
+          maxContextTokens: maxContextTokens || "",
+          compactPct: compactMode === "percent" ? compactPct : "",
+          compactMode,
+          disableUnknownModelEnforcement,
+          enableGatewayDiscovery,
+        }),
       });
       const data = await res.json();
       if (res.ok) {
         // Remember the endpoint so it stays selectable next time
         rememberEndpoint(getEffectiveBaseUrl(), { tunnelPublicUrl, tailscaleUrl });
         setMessage({ type: "success", text: "Settings applied successfully!" });
-        setClaudeStatus(prev => ({ ...prev, hasBackup: true, settings: { ...prev?.settings, env }, exaMcpEnabled }));
+        setClaudeStatus(prev => ({
+          ...prev,
+          hasBackup: true,
+          settings: {
+            ...prev?.settings,
+            env: {
+              ...prev?.settings?.env,
+              ...env,
+              CLAUDE_CODE_MAX_CONTEXT_TOKENS: maxContextTokens ? String(maxContextTokens) : undefined,
+              CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: compactMode === "percent" ? String(compactPct) : undefined,
+              CLAUDE_CODE_AUTO_COMPACT_WINDOW: compactMode === "fixed" ? String(autoCompactWindow) : undefined,
+              CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: disableUnknownModelEnforcement ? "1" : undefined,
+              CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: enableGatewayDiscovery ? "1" : undefined,
+            },
+          },
+          exaMcpEnabled,
+        }));
       } else {
         setMessage({ type: "error", text: data.error || "Failed to apply settings" });
       }
@@ -253,7 +370,13 @@ export default function ClaudeToolCard({
         setSelectedApiKey("");
         setExaMcpEnabled(false);
         setAutoCompactWindow("");
+        setMaxContextTokens("");
+        setCompactMode("percent");
+        setCompactPct("80");
+        setDisableUnknownModelEnforcement(true);
+        setEnableGatewayDiscovery(true);
         setOneMContext(false);
+        hasUserEditedMaxContext.current = false;
       } else {
         setMessage({ type: "error", text: data.error || "Failed to reset settings" });
       }
@@ -270,7 +393,19 @@ export default function ClaudeToolCard({
   };
 
   const handleModelSelect = (model) => {
-    if (currentEditingAlias) onModelMappingChange(currentEditingAlias, model.value);
+    if (currentEditingAlias) {
+      const val = withContextMarker(model.value, oneMContext);
+      onModelMappingChange(currentEditingAlias, val);
+
+      // Auto-update max context tokens if setting primary/sonnet model or user hasn't custom typed
+      const clean = stripModelContextMarker(val).model;
+      const caps = getCaps(clean);
+      if (caps?.contextWindow) {
+        if (currentEditingAlias === "sonnet" || !hasUserEditedMaxContext.current) {
+          setMaxContextTokens(String(caps.contextWindow));
+        }
+      }
+    }
   };
 
   // Generate settings.json content for manual copy
@@ -283,8 +418,19 @@ export default function ClaudeToolCard({
       const targetModel = modelMappings[model.alias];
       if (targetModel && model.envKey) env[model.envKey] = targetModel;
     });
-    if (autoCompactWindow) {
-      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = autoCompactWindow;
+    if (maxContextTokens && Number(maxContextTokens) > 0) {
+      env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(maxContextTokens);
+    }
+    if (compactMode === "percent" && compactPct) {
+      env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(compactPct);
+    } else if (compactMode === "fixed" && autoCompactWindow) {
+      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(autoCompactWindow);
+    }
+    if (disableUnknownModelEnforcement) {
+      env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT = "1";
+    }
+    if (enableGatewayDiscovery) {
+      env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
     }
 
     return [
@@ -294,6 +440,12 @@ export default function ClaudeToolCard({
       },
     ];
   };
+
+  const effectiveMaxContext = parseInt(maxContextTokens, 10) || detectedPrimaryContext || (oneMContext ? 1000000 : 200000);
+  const calculatedCompactThreshold = Math.min(
+    Math.floor(effectiveMaxContext * ((parseFloat(compactPct) || 80) / 100)),
+    effectiveMaxContext - 13000 > 0 ? effectiveMaxContext - 13000 : effectiveMaxContext
+  );
 
   return (
     <Card padding="xs" className="overflow-hidden">
@@ -398,53 +550,189 @@ export default function ClaudeToolCard({
                 </div>
 
                 {/* Model Mappings */}
-                {tool.defaultModels.map((model) => (
-                  <div key={model.alias} className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
-                    <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">{model.name}</span>
-                    <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="relative flex-1 min-w-0">
-                        <input
-                          type="text"
-                          value={modelMappings[model.alias] || ""}
-                          onChange={(e) => onModelMappingChange(model.alias, e.target.value)}
-                          placeholder="provider/model-id"
-                          className="w-full min-w-0 pl-2 pr-7 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
-                        />
-                        {modelMappings[model.alias] && (
-                          <button
-                            onClick={() => onModelMappingChange(model.alias, "")}
-                            className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-text-muted hover:text-red-500 rounded transition-colors"
-                            title="Clear"
-                          >
-                            <span className="material-symbols-outlined text-[14px]">close</span>
-                          </button>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => openModelSelector(model.alias)}
-                        disabled={!hasActiveProviders}
-                        className={`rounded border px-2.5 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap shrink-0 ${
-                          hasActiveProviders
-                            ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer"
-                            : "opacity-50 cursor-not-allowed border-border"
-                        }`}
-                      >
-                        Select
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                {tool.defaultModels.map((model) => {
+                  const mappedValue = modelMappings[model.alias] || "";
+                  const cleanModel = mappedValue ? stripModelContextMarker(mappedValue).model : "";
+                  const modelCaps = cleanModel ? getCaps(cleanModel) : null;
+                  const ctxWindow = modelCaps?.contextWindow;
 
-                {/* Auto-compact window */}
+                  return (
+                    <div key={model.alias} className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
+                      <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">{model.name}</span>
+                      <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="relative flex-1 min-w-0">
+                          <input
+                            type="text"
+                            value={mappedValue}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              onModelMappingChange(model.alias, val);
+                              const clean = stripModelContextMarker(val).model;
+                              const caps = getCaps(clean);
+                              if (caps?.contextWindow && (model.alias === "sonnet" || !hasUserEditedMaxContext.current)) {
+                                setMaxContextTokens(String(caps.contextWindow));
+                              }
+                            }}
+                            placeholder="provider/model-id"
+                            className="w-full min-w-0 pl-2 pr-7 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
+                          />
+                          {mappedValue && (
+                            <button
+                              onClick={() => onModelMappingChange(model.alias, "")}
+                              className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-text-muted hover:text-red-500 rounded transition-colors"
+                              title="Clear"
+                            >
+                              <span className="material-symbols-outlined text-[14px]">close</span>
+                            </button>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => openModelSelector(model.alias)}
+                          disabled={!hasActiveProviders}
+                          className={`rounded border px-2.5 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap shrink-0 ${
+                            hasActiveProviders
+                              ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer"
+                              : "opacity-50 cursor-not-allowed border-border"
+                          }`}
+                        >
+                          Select
+                        </button>
+                        {ctxWindow ? (
+                          <span
+                            className="inline-flex items-center gap-1 rounded bg-surface/80 px-2 py-2 text-[11px] font-mono text-text-muted border border-border shrink-0 select-none sm:py-1.5"
+                            title={`${ctxWindow.toLocaleString()} tokens context window`}
+                          >
+                            <span className="material-symbols-outlined text-[13px] text-primary">data_object</span>
+                            ctx {fmtContext(ctxWindow)}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Max Context Tokens (CLAUDE_CODE_MAX_CONTEXT_TOKENS) */}
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
-                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Auto-compact</span>
+                  <div className="flex items-center gap-1 sm:justify-end">
+                    <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Max Context</span>
+                    <Tooltip text="Sets CLAUDE_CODE_MAX_CONTEXT_TOKENS in ~/.claude/settings.json. Informs Claude Code of your model's true context limit (e.g. 40,960 for local117) so it doesn't assume 200k or crash providers.">
+                      <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
+                    </Tooltip>
+                  </div>
                   <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
-                  <select value={autoCompactWindow} onChange={(e) => setAutoCompactWindow(e.target.value)} className="w-full min-w-0 px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5">
-                    {CONTEXT_OPTIONS.map((opt) => (
-                      <option key={opt.label} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="relative flex-1 min-w-0">
+                      <input
+                        type="number"
+                        value={maxContextTokens}
+                        onChange={(e) => {
+                          hasUserEditedMaxContext.current = true;
+                          setMaxContextTokens(e.target.value);
+                        }}
+                        placeholder={detectedPrimaryContext ? String(detectedPrimaryContext) : "e.g. 40960"}
+                        className="w-full min-w-0 pl-2 pr-7 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5 font-mono"
+                      />
+                      {maxContextTokens && (
+                        <button
+                          onClick={() => {
+                            hasUserEditedMaxContext.current = true;
+                            setMaxContextTokens("");
+                          }}
+                          className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-text-muted hover:text-red-500 rounded transition-colors"
+                          title="Clear"
+                        >
+                          <span className="material-symbols-outlined text-[14px]">close</span>
+                        </button>
+                      )}
+                    </div>
+                    {detectedPrimaryContext ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          hasUserEditedMaxContext.current = false;
+                          setMaxContextTokens(String(detectedPrimaryContext));
+                        }}
+                        className="rounded border border-border bg-surface px-2.5 py-2 text-xs text-text-muted hover:text-text-main hover:border-primary transition-colors sm:py-1.5 whitespace-nowrap shrink-0"
+                        title={`Reset to detected context from Sonnet: ${detectedPrimaryContext.toLocaleString()} tokens`}
+                      >
+                        Auto ({fmtContext(detectedPrimaryContext)})
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                {/* Auto-compact */}
+                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
+                  <div className="flex items-center gap-1 sm:justify-end">
+                    <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Auto-compact</span>
+                    <Tooltip text="Controls when Claude Code auto-compacts conversation history. Percentage mode sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE; Token mode sets CLAUDE_CODE_AUTO_COMPACT_WINDOW.">
+                      <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
+                    </Tooltip>
+                  </div>
+                  <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
+                  <div className="flex flex-col gap-1.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={compactMode}
+                        onChange={(e) => setCompactMode(e.target.value)}
+                        className="px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
+                      >
+                        <option value="percent">Percentage (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE)</option>
+                        <option value="fixed">Fixed Tokens (CLAUDE_CODE_AUTO_COMPACT_WINDOW)</option>
+                        <option value="default">Default</option>
+                      </select>
+
+                      {compactMode === "percent" && (
+                        <select
+                          value={compactPct}
+                          onChange={(e) => setCompactPct(e.target.value)}
+                          className="px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5 font-medium"
+                        >
+                          <option value="50">50%</option>
+                          <option value="60">60%</option>
+                          <option value="70">70%</option>
+                          <option value="75">75%</option>
+                          <option value="80">80% (Recommended)</option>
+                          <option value="85">85%</option>
+                          <option value="90">90%</option>
+                          <option value="95">95%</option>
+                        </select>
+                      )}
+
+                      {compactMode === "fixed" && (
+                        <div className="flex items-center gap-1.5 flex-1 min-w-[140px]">
+                          <select
+                            value={FIXED_CONTEXT_OPTIONS.some((o) => o.value === autoCompactWindow) ? autoCompactWindow : "custom"}
+                            onChange={(e) => {
+                              if (e.target.value !== "custom") setAutoCompactWindow(e.target.value);
+                            }}
+                            className="px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
+                          >
+                            {FIXED_CONTEXT_OPTIONS.map((opt) => (
+                              <option key={opt.label} value={opt.value}>{opt.label}</option>
+                            ))}
+                            <option value="custom">Custom...</option>
+                          </select>
+                          {(!FIXED_CONTEXT_OPTIONS.some((o) => o.value === autoCompactWindow) || autoCompactWindow === "") && (
+                            <input
+                              type="number"
+                              value={autoCompactWindow}
+                              onChange={(e) => setAutoCompactWindow(e.target.value)}
+                              placeholder="tokens, e.g. 32000"
+                              className="flex-1 min-w-0 px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5 font-mono"
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {compactMode === "percent" && (
+                      <p className="text-[11px] text-text-muted">
+                        Compacts at ~<span className="font-semibold text-text-main">{calculatedCompactThreshold.toLocaleString()} tokens</span> ({compactPct}% of {effectiveMaxContext.toLocaleString()} max context)
+                      </p>
+                    )}
+                  </div>
                 </div>
 
                 {/* 1M context */}
@@ -455,6 +743,42 @@ export default function ClaudeToolCard({
                     <input type="checkbox" checked={oneMContext} onChange={(e) => handleOneMContextToggle(e.target.checked)} className="w-3.5 h-3.5 accent-primary cursor-pointer shrink-0" />
                     <span className="text-xs text-text-muted">Append [1m] to the model name</span>
                     <Tooltip text="Claude Code otherwise assumes a 200K window, which clamps the auto-compact window above. Applied to every mapped model — only enable it for models that really accept 1M.">
+                      <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
+                    </Tooltip>
+                  </label>
+                </div>
+
+                {/* Gateway Discovery */}
+                <div className="flex flex-wrap items-center justify-between gap-1.5 sm:grid sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
+                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Gateway Models</span>
+                  <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={enableGatewayDiscovery}
+                      onChange={(e) => setEnableGatewayDiscovery(e.target.checked)}
+                      className="w-3.5 h-3.5 accent-primary cursor-pointer shrink-0"
+                    />
+                    <span className="text-xs text-text-muted">Gateway model discovery</span>
+                    <Tooltip text="Sets CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1. Tells Claude Code to fetch available models from 9router (GET /v1/models) so custom and routed models appear directly inside Claude Code's /model picker.">
+                      <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
+                    </Tooltip>
+                  </label>
+                </div>
+
+                {/* Disable Unknown Model Window Enforcement */}
+                <div className="flex flex-wrap items-center justify-between gap-1.5 sm:grid sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
+                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Window Relax</span>
+                  <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={disableUnknownModelEnforcement}
+                      onChange={(e) => setDisableUnknownModelEnforcement(e.target.checked)}
+                      className="w-3.5 h-3.5 accent-primary cursor-pointer shrink-0"
+                    />
+                    <span className="text-xs text-text-muted">Disable unknown model enforcement</span>
+                    <Tooltip text="Sets CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1. Prevents Claude Code from forcing an arbitrary 200k context clamp on unrecognized model IDs, allowing custom context limits and compacting thresholds to take effect accurately.">
                       <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
                     </Tooltip>
                   </label>

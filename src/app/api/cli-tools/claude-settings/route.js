@@ -123,7 +123,16 @@ export async function GET() {
 // POST - Backup old fields and write new settings
 export async function POST(request) {
   try {
-    const { env, exaMcpEnabled, autoCompactWindow } = await request.json();
+    const {
+      env,
+      exaMcpEnabled,
+      autoCompactWindow,
+      maxContextTokens,
+      compactPct,
+      compactMode,
+      disableUnknownModelEnforcement,
+      enableGatewayDiscovery,
+    } = await request.json();
     
     if (!env || typeof env !== "object") {
       return NextResponse.json(
@@ -171,13 +180,52 @@ export async function POST(request) {
       },
     };
 
-    // CLAUDE_CODE_AUTO_COMPACT_WINDOW — the token threshold that triggers
-    // auto-compact. Only set when a concrete value is chosen; "Default" removes
-    // the key so Claude Code derives the window from the model.
-    if (autoCompactWindow) {
+    // CLAUDE_CODE_MAX_CONTEXT_TOKENS — inform Claude Code of unrecognized model's context window
+    const resolvedMaxContext = maxContextTokens || env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+    if (resolvedMaxContext && Number(resolvedMaxContext) > 0) {
+      newSettings.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(resolvedMaxContext);
+    } else {
+      delete newSettings.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+    }
+
+    // Compaction thresholds:
+    // Percentage mode (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) takes a percentage like 80 (80%).
+    // Fixed mode (CLAUDE_CODE_AUTO_COMPACT_WINDOW) takes a concrete token count like 198000.
+    const isPercent = compactMode === "percent" || (compactPct && !autoCompactWindow);
+    const isFixed = compactMode === "fixed" || (autoCompactWindow && !compactPct);
+
+    if (isPercent && compactPct && Number(compactPct) > 0) {
+      newSettings.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(compactPct);
+      delete newSettings.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+      delete newSettings.autoCompactWindow;
+    } else if (isFixed && autoCompactWindow) {
       newSettings.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(autoCompactWindow);
+      delete newSettings.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
+      delete newSettings.autoCompactWindow;
     } else {
       delete newSettings.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+      delete newSettings.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
+      delete newSettings.autoCompactWindow;
+    }
+
+    // CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT
+    const shouldDisableEnforcement = disableUnknownModelEnforcement !== undefined
+      ? Boolean(disableUnknownModelEnforcement)
+      : env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT === "1";
+    if (shouldDisableEnforcement) {
+      newSettings.env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT = "1";
+    } else {
+      delete newSettings.env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT;
+    }
+
+    // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+    const shouldEnableDiscovery = enableGatewayDiscovery !== undefined
+      ? Boolean(enableGatewayDiscovery)
+      : env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1";
+    if (shouldEnableDiscovery) {
+      newSettings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+    } else {
+      delete newSettings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
     }
 
     // Write new settings
@@ -208,8 +256,13 @@ const RESET_ENV_KEYS = [
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL",
   "API_TIMEOUT_MS",
   "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
+  "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
 ];
 
 // DELETE - Reset settings (remove env fields)
@@ -243,6 +296,9 @@ export async function DELETE() {
         delete currentSettings.env;
       }
     }
+
+    // Also remove top-level autoCompactWindow
+    delete currentSettings.autoCompactWindow;
 
     // Remove injected MCP servers (Exa) from ~/.claude.json
     await writeClaudeJsonMcp(null);

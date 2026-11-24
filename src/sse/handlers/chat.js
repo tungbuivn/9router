@@ -28,6 +28,25 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
+import { createRequestLog, updateRequestLogStage, safeClone } from "@/lib/requestFileLogger";
+
+function logEarlyOutcome(requestLogId, status, statusCode, responseData, startTime) {
+  if (!requestLogId) return;
+  updateRequestLogStage(
+    requestLogId,
+    "response",
+    {
+      type: "json",
+      statusCode,
+      ...responseData,
+    },
+    {
+      status,
+      statusCode,
+      latency: { ttft: Date.now() - startTime, total: Date.now() - startTime },
+    }
+  ).catch(() => {});
+}
 
 /**
  * Handle chat completion request
@@ -35,6 +54,7 @@ import { resolveSmartChoice } from "../services/systemoneRouter.js";
  * Format detection and translation handled by translator
  */
 export async function handleChat(request, clientRawRequest = null) {
+  const startTime = Date.now();
   let body;
   try {
     body = await request.json();
@@ -43,15 +63,34 @@ export async function handleChat(request, clientRawRequest = null) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
 
-  // Build clientRawRequest for logging (if not provided)
-  if (!clientRawRequest) {
-    const url = new URL(request.url);
-    clientRawRequest = {
-      endpoint: url.pathname,
-      body,
-      headers: Object.fromEntries(request.headers.entries())
-    };
+  // Build / normalize clientRawRequest for logging (preserve flags like isDashboard)
+  const url = new URL(request.url);
+  const rawBodySnapshot = safeClone(body);
+  const rawHeaders = Object.fromEntries(request.headers.entries());
+  clientRawRequest = {
+    ...(clientRawRequest || {}),
+    endpoint: clientRawRequest?.endpoint || url.pathname,
+    body: clientRawRequest?.body || rawBodySnapshot,
+    headers: clientRawRequest?.headers || rawHeaders,
+  };
+
+  // Stage 1: Persist raw incoming request to disk-backed rolling JSON log
+  let requestLogId = clientRawRequest.requestLogId || null;
+  if (!requestLogId) {
+    try {
+      const created = await createRequestLog({
+        method: request.method || "POST",
+        endpoint: clientRawRequest.endpoint,
+        headers: clientRawRequest.headers,
+        body: rawBodySnapshot,
+        clientModel: rawBodySnapshot?.model || null,
+        detectedFormat: detectFormatByEndpoint(clientRawRequest.endpoint, rawBodySnapshot) || null,
+      });
+      requestLogId = created.id;
+      clientRawRequest.requestLogId = requestLogId;
+    } catch { /* logging must never break requests */ }
   }
+  try {
   // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
   // no combo, alias or provider/model pair, so it must not reach resolution.
   // The capability travels in the anthropic-beta header, forwarded as-is.
@@ -73,22 +112,25 @@ export async function handleChat(request, clientRawRequest = null) {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  // Enforce API key if enabled in settings
+  // Enforce API key if enabled in settings (bypassed for authenticated dashboard requests)
   const settings = await getSettings();
-  if (settings.requireApiKey) {
+  if (settings.requireApiKey && !clientRawRequest?.isDashboard) {
     if (!apiKey) {
       log.warn("AUTH", "Missing API key (requireApiKey=true)");
+      logEarlyOutcome(requestLogId, "error", HTTP_STATUS.UNAUTHORIZED, { error: "Missing API key" }, startTime);
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
     }
     const valid = await isValidApiKey(apiKey);
     if (!valid) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
+      logEarlyOutcome(requestLogId, "error", HTTP_STATUS.UNAUTHORIZED, { error: "Invalid API key" }, startTime);
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
     }
   }
 
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
+    logEarlyOutcome(requestLogId, "error", HTTP_STATUS.BAD_REQUEST, { error: "Missing model" }, startTime);
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
   }
 
@@ -97,12 +139,19 @@ export async function handleChat(request, clientRawRequest = null) {
   // and any credential lookup; an allowed combo grants the members it routes to.
   const keyAccess = await getKeyAccessContext(request);
   const keyAccessDenied = await enforceKeyAccess(keyAccess, modelStr);
-  if (keyAccessDenied) return keyAccessDenied;
+  if (keyAccessDenied) {
+    logEarlyOutcome(requestLogId, "error", keyAccessDenied.status || HTTP_STATUS.FORBIDDEN, { error: "API key access denied for model" }, startTime);
+    return keyAccessDenied;
+  }
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
-  if (bypassResponse) return bypassResponse.response || bypassResponse;
+  if (bypassResponse) {
+    const resp = bypassResponse.response || bypassResponse;
+    logEarlyOutcome(requestLogId, "success", resp?.status || 200, { content: "[Bypassed warmup/naming request]", bypassed: true }, startTime);
+    return resp;
+  }
 
   const requiredCapabilities = detectRequiredCapabilities(body);
 
@@ -118,7 +167,7 @@ export async function handleChat(request, clientRawRequest = null) {
 
     if (comboStrategy === "fusion") {
       log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
-      return handleFusionChat({
+      return await handleFusionChat({
         body,
         models: comboModels,
         handleSingleModel: (b, m, isPanel) => {
@@ -139,7 +188,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
     const comboCfg = comboStrategies[modelStr] || {};
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
-    return handleComboChat({
+    return await handleComboChat({
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
@@ -171,7 +220,7 @@ export async function handleChat(request, clientRawRequest = null) {
   if (soloAugmented.length > 1) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
-    return handleComboChat({
+    return await handleComboChat({
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
@@ -184,7 +233,11 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null);
+  return await handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null);
+  } catch (err) {
+    logEarlyOutcome(requestLogId, "error", HTTP_STATUS.INTERNAL_SERVER_ERROR || 500, { error: err?.message || String(err) }, startTime);
+    throw err;
+  }
 }
 
 /**
@@ -260,6 +313,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
+    logEarlyOutcome(clientRawRequest?.requestLogId, "error", HTTP_STATUS.BAD_REQUEST, { error: "Invalid model format" }, Date.now());
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
   }
 
@@ -285,13 +339,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
+        logEarlyOutcome(clientRawRequest?.requestLogId, "error", status, { error: `[${provider}/${model}] ${errorMsg}` }, Date.now());
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman, lastHeaders);
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
+        logEarlyOutcome(clientRawRequest?.requestLogId, "error", HTTP_STATUS.NOT_FOUND, { error: `No active credentials for provider: ${provider}` }, Date.now());
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
+      logEarlyOutcome(clientRawRequest?.requestLogId, "error", lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, { error: lastError || "All accounts unavailable" }, Date.now());
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
     }
 
@@ -333,6 +390,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       customPromptEnabled: !!chatSettings.customPromptEnabled,
       customPrompt: chatSettings.customPrompt || "",
       reaAllowEnabled: !!chatSettings.reaAllowEnabled,
+      skillsOptimizerMode: chatSettings.skillsOptimizerMode || "off",
       pxpipeEnabled: !!chatSettings.pxpipeEnabled,
       pxpipeMinChars: chatSettings.pxpipeMinChars,
       pxpipeTimeoutMs: chatSettings.pxpipeTimeoutMs,

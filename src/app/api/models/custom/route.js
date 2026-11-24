@@ -4,12 +4,18 @@ import { CAPACITY_META, isSttTransport } from "@/shared/constants/models";
 
 export const dynamic = "force-dynamic";
 
-// Whitelist capability keys to boolean values — ignore anything else
+// Whitelist capability keys to boolean values and numeric limits — ignore anything else
 function sanitizeCaps(caps) {
   if (!caps || typeof caps !== "object") return null;
   const clean = {};
   for (const key of Object.keys(CAPACITY_META)) {
     if (typeof caps[key] === "boolean") clean[key] = caps[key];
+  }
+  if (Number.isFinite(caps.contextWindow) && caps.contextWindow > 0) {
+    clean.contextWindow = Math.round(caps.contextWindow);
+  }
+  if (Number.isFinite(caps.maxOutput) && caps.maxOutput > 0) {
+    clean.maxOutput = Math.round(caps.maxOutput);
   }
   return Object.keys(clean).length ? clean : null;
 }

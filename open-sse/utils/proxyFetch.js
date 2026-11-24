@@ -10,6 +10,8 @@ import {
 } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 import { ensureClaudeCliVersion, applyClaudeCliVersion } from "./claudeCliVersion.js";
+import { resolveActiveW2ProxyUrl } from "./w2Proxy.js";
+import { ensureBuiltinProxyReady, interceptInProcessFetch } from "./builtinProxy.js";
 
 const CLAUDE_UA_PROBE = /claude-cli\/\d/;
 function hasClaudeCliHeader(headers) {
@@ -474,6 +476,17 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 }
 
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
+  const targetUrl = typeof url === "string" ? url : url.toString();
+  // Ensure built-in proxy config is loaded from DB (non-blocking fail-open outside Next.js)
+  if (process.env.W2_AUTO_PROXY_URL === undefined) {
+    try { await ensureBuiltinProxyReady(); } catch {}
+  }
+  return interceptInProcessFetch(targetUrl, options, (nextUrl, nextOptions) =>
+    executeProxyAwareFetch(nextUrl, nextOptions, proxyOptions)
+  );
+}
+
+async function executeProxyAwareFetch(url, options = {}, proxyOptions = null) {
   // Keep the spoofed Claude Code version current (new models require a minimum CLI version).
   // Refresh in the background: the request uses the version already known, so an
   // unreachable npm registry can never add latency to the chat path.
@@ -500,7 +513,10 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
 
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);
   const envProxyUrl = connectionProxyUrl ? null : normalizeProxyUrl(getEnvProxyUrl(targetUrl));
-  const proxyUrl = connectionProxyUrl || envProxyUrl;
+  const w2ProxyUrl = (connectionProxyUrl || envProxyUrl)
+    ? null
+    : await resolveActiveW2ProxyUrl(targetUrl);
+  const proxyUrl = connectionProxyUrl || envProxyUrl || w2ProxyUrl;
   const forceFreshSocket = proxyOptions?.forceFreshSocket === true || options?.forceFreshSocket === true;
 
   // Protocol adapters that own their transport (wreq-js TLS impersonation)

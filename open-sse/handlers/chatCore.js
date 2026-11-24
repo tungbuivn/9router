@@ -13,7 +13,13 @@ import { upstreamResponseHeaders } from "../utils/upstreamHeaders.js";
 import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
+import { createRequestLog, updateRequestLogStage, extractMessagesView, safeClone, maskHeaders } from "@/lib/requestFileLogger.js";
+import { scheduleW2CaptureSync } from "../utils/w2Capture.js";
+import { getW2AutoProxyConfig, isLocalTargetUrl } from "../utils/w2Proxy.js";
+import { isBuiltinProxyActive } from "../utils/builtinProxy.js";
+import { runWithRequestLogId } from "../utils/requestLogContext.js";
 import { getExecutor } from "../executors/index.js";
+import { resolveAcpStripSystemPrompt, stripSystemMessagesForAcp, stripToolsForAcp } from "../executors/acp.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
 import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
 import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
@@ -25,6 +31,7 @@ import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { injectCustomPrompt } from "../rtk/customPrompt.js";
+import { optimizeAvailableSkills } from "../rtk/skillsOptimizer.js";
 import { applyReaAllow } from "../translator/concerns/systemPrompt.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
@@ -62,9 +69,11 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, customPromptEnabled, customPrompt, reaAllowEnabled, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, customPromptEnabled, customPrompt, reaAllowEnabled, skillsOptimizerMode = "off", pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
+  // Capture pristine body snapshot strictly BEFORE any modification (thinking, RTK, ACP strip, translate, etc.)
+  const bodyBeforeModify = safeClone(body);
   // Stable per-session color so all lines of one CLI conversation share a tag
   const sessionSeed = (() => {
     try {
@@ -112,6 +121,57 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const targetFormat = useTransport?.format || modelTargetFormat || getTargetFormat(provider, credentials);
   if (useTransport && credentials) credentials.runtimeTransport = useTransport;
   const stripList = getModelStrip(alias, model);
+  const upstreamModel = getModelUpstreamId(alias, model, bodyBeforeModify);
+
+  // Ensure a per-request disk log file exists (covers direct handleChatCore calls as well)
+  let requestLogId = clientRawRequest?.requestLogId || null;
+  if (!requestLogId) {
+    try {
+      const created = await createRequestLog({
+        method: "POST",
+        endpoint: clientRawRequest?.endpoint || "/v1/chat/completions",
+        headers: clientRawRequest?.headers || {},
+        body: clientRawRequest?.body || bodyBeforeModify,
+        clientModel: clientRawRequest?.body?.model || bodyBeforeModify?.model || `${provider}/${model}`,
+        detectedFormat: sourceFormat,
+      });
+      requestLogId = created.id;
+    } catch { /* logging must never fail requests */ }
+  }
+
+  // Stage 2: Log pristine messages & body BEFORE any modification (thinking, RTK, ACP strip, translate, injectors)
+  if (requestLogId) {
+    const beforeView = extractMessagesView(bodyBeforeModify);
+    const providerName = credentials?.providerSpecificData?.nodeName || credentials?.connectionName || provider;
+    updateRequestLogStage(
+      requestLogId,
+      "beforeModify",
+      {
+        provider,
+        providerName,
+        model,
+        upstreamModel,
+        connectionId: connectionId || credentials?.connectionId || null,
+        accountName: credentials?.connectionName || null,
+        sourceFormat,
+        targetFormat,
+        messageCount: beforeView.messageCount,
+        system: beforeView.system,
+        messages: beforeView.messages,
+        body: bodyBeforeModify,
+      },
+      {
+        provider,
+        providerName,
+        model,
+        sourceFormat,
+        targetFormat,
+      }
+    ).catch(() => {});
+  }
+
+  // Track modifications applied to the message payload
+  const appliedMods = [];
 
   // Inject provider-level thinking config override (only if client hasn't set)
   // on/off → extended type (body.thinking), none/low/medium/high → effort type (body.reasoning_effort)
@@ -120,14 +180,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (mode === "on" && !body.thinking) {
       console.log("Injecting provider-level thinking config override: on");
       body = { ...body, thinking: { type: "enabled", budget_tokens: 10000 } };
+      appliedMods.push("THINKING:on");
     } else if (mode === "off" && !body.thinking) {
       body = { ...body, thinking: { type: "disabled" } };
+      appliedMods.push("THINKING:off");
     } else if (!body.reasoning_effort) {
       body = { ...body, reasoning_effort: mode };
+      appliedMods.push(`THINKING:${mode}`);
     }
   }
-
-  const upstreamModel = getModelUpstreamId(alias, model, body);
 
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
@@ -143,7 +204,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (preTranslateRtkLine) console.log(preTranslateRtkLine);
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
-  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;
+  const isAcp = typeof provider === "string" && (provider === "acp" || provider.startsWith("acp-"));
+  const acpStripSystemPrompt = isAcp && resolveAcpStripSystemPrompt(credentials);
+  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true || isAcp;
   let stream = providerRequiresStreaming ? true : (body.stream !== false);
 
   // Image generation models require non-streaming (Google v1internal:generateContent)
@@ -173,6 +236,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   reqLogger.logRawRequest(body);
   log?.debug?.("FORMAT", `${sourceFormat} → ${targetFormat} | stream=${stream}`);
 
+  // ACP agents manage their own system prompt & tools: strip client system messages
+  // and unused OpenAI/Claude/Gemini tool definitions ONLY for ACP on a non-mutating
+  // copy so non-ACP providers (and combo fallback legs) are completely untouched.
+  if (acpStripSystemPrompt) {
+    body = stripSystemMessagesForAcp(body);
+  }
+  let acpStrippedToolsCount = 0;
+  if (isAcp) {
+    const strippedTools = stripToolsForAcp(body);
+    body = strippedTools.body;
+    acpStrippedToolsCount = strippedTools.strippedCount;
+  }
+
   // Native passthrough: CLI tool and provider are the same ecosystem
   // Skip all translation/normalization — only model and Bearer are swapped
   const clientTool = detectClientTool(clientRawRequest?.headers || {}, body);
@@ -185,6 +261,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (!passthrough) {
     const caps = getCapabilitiesForModel(provider, model);
     if (stripUnsupportedModalities(body, sourceFormat, caps)) {
+      appliedMods.push("MODALITY:STRIP");
       log?.debug?.("MODALITY", `stripped unsupported media for ${provider}/${model}`);
     }
     // Convert remote image URLs to base64 for targets that can't fetch URLs.
@@ -198,6 +275,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   let toolNameMap;
   let customToolNames;
   if (passthrough) {
+    appliedMods.push("PASSTHROUGH");
     log?.debug?.("PASSTHROUGH", `${clientTool} → ${provider} | native lossless`);
     translatedBody = { ...body, model: stripThinkingSuffix(upstreamModel) };
     if (provider === "codex") {
@@ -215,9 +293,18 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
+    if (sourceFormat !== targetFormat) appliedMods.push(`TRANSLATE:${sourceFormat}->${targetFormat}`);
     translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
     if (!translatedBody) {
       trackPendingRequest(model, provider, connectionId, false, true);
+      if (requestLogId) {
+        updateRequestLogStage(
+          requestLogId,
+          "response",
+          { type: "json", statusCode: HTTP_STATUS.BAD_REQUEST, error: `Failed to translate request for ${sourceFormat} → ${targetFormat}` },
+          { status: "error", statusCode: HTTP_STATUS.BAD_REQUEST, latency: { ttft: 0, total: Date.now() - requestStartTime } }
+        ).catch(() => {});
+      }
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
     }
     toolNameMap = translatedBody._toolNameMap;
@@ -234,6 +321,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const { tools: deduped, stripped } = dedupeTools(translatedBody.tools, { clientTool, model, messages: translatedBody.messages });
     if (stripped.length > 0) {
       translatedBody.tools = deduped;
+      appliedMods.push(`TOOLDEDUP:${stripped.length}`);
       log?.debug?.("TOOLDEDUP", `stripped ${stripped.length}: ${stripped.slice(0, 3).join(", ")}${stripped.length > 3 ? "..." : ""}`);
     }
   }
@@ -297,28 +385,43 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
 
+  if (acpStripSystemPrompt) xf.push("ACP:NO-SYS");
+  if (acpStrippedToolsCount > 0) xf.push(`ACP:NO-TOOLS(${acpStrippedToolsCount})`);
   if (rtkStats?.hits?.length) xf.push(`RTK:${rtkStats.hits.length}`);
 
-  // REA allow: strip built-in security-policy paragraphs, then inject REA guidance for every client.
-  if (reaAllowEnabled && applyReaAllow(translatedBody, finalFormat)) {
-    xf.push("REAALLOW");
-  }
+  // Skip system-prompt injectors when running through ACP with system stripping enabled
+  // so 9router does not re-inject system messages onto an ACP agent that already has its own.
+  if (!acpStripSystemPrompt) {
+    // REA allow: strip built-in security-policy paragraphs, then inject REA guidance for every client.
+    if (reaAllowEnabled && applyReaAllow(translatedBody, finalFormat)) {
+      xf.push("REAALLOW");
+    }
 
-  // Caveman: inject terse-style system prompt
-  if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
-    injectCaveman(translatedBody, finalFormat, cavemanLevel);
-    xf.push(`CAVEMAN:${cavemanLevel}`);
-  }
+    // Caveman: inject terse-style system prompt
+    if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
+      injectCaveman(translatedBody, finalFormat, cavemanLevel);
+      xf.push(`CAVEMAN:${cavemanLevel}`);
+    }
 
-  // Ponytail: inject lazy-senior-dev system prompt
-  if (tokenSaverEnabled && ponytailEnabled && ponytailLevel) {
-    injectPonytail(translatedBody, finalFormat, ponytailLevel);
-    xf.push(`PONYTAIL:${ponytailLevel}`);
-  }
+    // Ponytail: inject lazy-senior-dev system prompt
+    if (tokenSaverEnabled && ponytailEnabled && ponytailLevel) {
+      injectPonytail(translatedBody, finalFormat, ponytailLevel);
+      xf.push(`PONYTAIL:${ponytailLevel}`);
+    }
 
-  // Custom prompt: user-authored instruction, independent of the savers above
-  if (customPromptEnabled && injectCustomPrompt(translatedBody, finalFormat, customPrompt)) {
-    xf.push(`CUSTOMPROMPT:${customPrompt.trim().length}c`);
+    // Custom prompt: user-authored instruction, independent of the savers above
+    if (customPromptEnabled && injectCustomPrompt(translatedBody, finalFormat, customPrompt)) {
+      xf.push(`CUSTOMPROMPT:${customPrompt.trim().length}c`);
+    }
+
+    // Skills optimizer: shrink or defer <available_skills> blocks in system prompt
+    if (tokenSaverEnabled && skillsOptimizerMode && skillsOptimizerMode !== "off") {
+      const skStats = optimizeAvailableSkills(translatedBody, finalFormat, { mode: skillsOptimizerMode });
+      if (skStats.applied) {
+        const savedKb = (skStats.savedBytes / 1024).toFixed(1);
+        xf.push(`SKILLS:${skillsOptimizerMode}(-${savedKb}KB)`);
+      }
+    }
   }
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
@@ -340,6 +443,35 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // system/tools/messages, and a stale anchor costs a full prefix rewrite.
   if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
 
+  // Snapshot modified body right before executor dispatch (Stage 3: afterModify)
+  const postModifyBody = safeClone(translatedBody);
+  const allTransformations = Array.from(new Set([...appliedMods, ...xf]));
+  let afterModifyLogged = false;
+  const writeAfterModifyStage = (url = null, headers = null, executorPayload = null) => {
+    if (!requestLogId) return;
+    afterModifyLogged = true;
+    const afterView = extractMessagesView(postModifyBody);
+    updateRequestLogStage(
+      requestLogId,
+      "afterModify",
+      {
+        transformations: allTransformations,
+        providerUrl: url || null,
+        providerHeaders: headers ? maskHeaders(headers) : {},
+        messageCount: afterView.messageCount,
+        system: afterView.system,
+        messages: afterView.messages,
+        translatedBody: postModifyBody,
+        executorPayload: executorPayload ? safeClone(executorPayload) : null,
+      },
+      {
+        passthrough: Boolean(passthrough),
+        stream: Boolean(stream),
+        transformations: allTransformations,
+      }
+    ).catch(() => {});
+  };
+
   const executor = getExecutor(provider);
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
@@ -347,12 +479,33 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const msgCount = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || translatedBody.request?.contents?.length || 0;
   log?.debug?.("REQUEST", `${provider.toUpperCase()} | ${model} | ${msgCount} msgs`);
 
+  let streamFinalized = false;
   const streamController = createStreamController({
     onDisconnect: (reason) => {
       trackPendingRequest(model, provider, connectionId, false);
+      if (requestLogId && !streamFinalized) {
+        streamFinalized = true;
+        updateRequestLogStage(
+          requestLogId,
+          "response",
+          { type: "streaming", statusCode: 499, aborted: true, error: `Stream disconnected: ${reason || "client closed"}` },
+          { status: "error", statusCode: 499, latency: { ttft: 0, total: Date.now() - requestStartTime } }
+        ).catch(() => {});
+      }
       if (onDisconnect) onDisconnect(reason);
     },
-    onError: () => trackPendingRequest(model, provider, connectionId, false),
+    onError: (err) => {
+      trackPendingRequest(model, provider, connectionId, false);
+      if (requestLogId && !streamFinalized) {
+        streamFinalized = true;
+        updateRequestLogStage(
+          requestLogId,
+          "response",
+          { type: "streaming", statusCode: 502, aborted: true, error: err?.message || "Stream error" },
+          { status: "error", statusCode: 502, latency: { ttft: 0, total: Date.now() - requestStartTime } }
+        ).catch(() => {});
+      }
+    },
     log, provider, model, reqTag
   });
 
@@ -399,18 +552,21 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
   try {
-    const result = await executor.execute({
-      model,
-      body: translatedBody,
-      stream,
-      credentials,
-      providerSessionId: sessionSeed,
-      clientTool,
-      signal: streamController.signal,
-      log,
-      proxyOptions,
-      providerOverrides,
-    });
+    const result = await runWithRequestLogId(requestLogId, () =>
+      executor.execute({
+        model,
+        body: translatedBody,
+        stream,
+        credentials,
+        providerSessionId: sessionSeed,
+        clientTool,
+        signal: streamController.signal,
+        log,
+        proxyOptions,
+        providerOverrides,
+        requestLogId,
+      })
+    );
     providerResponse = result.response;
     providerUrl = result.url;
     providerHeaders = result.headers;
@@ -421,9 +577,20 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       toolNameMap = new Map([...(toolNameMap || []), ...renamedToolNames]);
     }
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+    writeAfterModifyStage(providerUrl, providerHeaders, finalBody);
   } catch (error) {
     trackPendingRequest(model, provider, connectionId, false, true);
-    appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
+    const errStatus = error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY;
+    appendRequestLog({ model, provider, connectionId, status: `FAILED ${errStatus}` }).catch(() => { });
+    if (!afterModifyLogged) writeAfterModifyStage(null, null, null);
+    if (requestLogId) {
+      updateRequestLogStage(
+        requestLogId,
+        "response",
+        { type: stream ? "streaming" : "json", statusCode: errStatus, error: error.message || String(error) },
+        { status: "error", statusCode: errStatus, latency: { ttft: 0, total: Date.now() - requestStartTime } }
+      ).catch(() => {});
+    }
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
@@ -468,18 +635,21 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
           try { await onCredentialsRefreshed(newCredentials); } catch (e) { log?.warn?.("TOKEN", `onCredentialsRefreshed failed: ${e.message}`); }
         }
         try {
-          const retryResult = await executor.execute({
-            model,
-            body: translatedBody,
-            stream,
-            credentials,
-            providerSessionId: sessionSeed,
-            clientTool,
-            signal: streamController.signal,
-            log,
-            proxyOptions,
-            providerOverrides,
-          });
+          const retryResult = await runWithRequestLogId(requestLogId, () =>
+            executor.execute({
+              model,
+              body: translatedBody,
+              stream,
+              credentials,
+              providerSessionId: sessionSeed,
+              clientTool,
+              signal: streamController.signal,
+              log,
+              proxyOptions,
+              providerOverrides,
+              requestLogId,
+            })
+          );
           if (retryResult.response.ok) {
             providerResponse = retryResult.response;
             providerUrl = retryResult.url;
@@ -499,6 +669,23 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
+    if (requestLogId) {
+      updateRequestLogStage(
+        requestLogId,
+        "response",
+        { type: stream ? "streaming" : "json", statusCode, error: message },
+        { status: "error", statusCode, latency: { ttft: 0, total: Date.now() - requestStartTime } }
+      ).catch(() => {});
+      const acpW2 = finalBody?.w2Proxy;
+      if (acpW2?.active && acpW2.mode !== "builtin") {
+        scheduleW2CaptureSync({ requestLogId, w2Url: acpW2.url, startTime: requestStartTime, endTime: Date.now() });
+      } else if (!acpW2 && !isBuiltinProxyActive()) {
+        const w2Cfg = getW2AutoProxyConfig();
+        if (w2Cfg.enabled && providerUrl && !isLocalTargetUrl(providerUrl)) {
+          scheduleW2CaptureSync({ requestLogId, w2Url: w2Cfg.url, startTime: requestStartTime, endTime: Date.now() });
+        }
+      }
+    }
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
@@ -519,7 +706,22 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers));
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  const triggerW2Sync = () => {
+    if (!requestLogId) return;
+    const acpW2 = finalBody?.w2Proxy;
+    if (acpW2) {
+      if (acpW2.mode === "builtin" || !acpW2.active) return;
+      scheduleW2CaptureSync({ requestLogId, w2Url: acpW2.url, startTime: requestStartTime, endTime: Date.now() });
+      return;
+    }
+    if (isBuiltinProxyActive()) return;
+    const w2Cfg = getW2AutoProxyConfig();
+    if (w2Cfg.enabled && providerUrl && !isLocalTargetUrl(providerUrl)) {
+      scheduleW2CaptureSync({ requestLogId, w2Url: w2Cfg.url, startTime: requestStartTime, endTime: Date.now() });
+    }
+  };
+
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, requestLogId, triggerW2Sync };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 
@@ -529,18 +731,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // this path — handleForcedSSEToJson returns null when the body is not SSE.
   if (!clientRequestedStreaming && (providerRequiresStreaming || providerResponseFormat === FORMATS.OPENAI_RESPONSES)) {
     const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, customToolNames, toolNameMap, trackDone, appendLog });
-    if (result) { streamController.handleComplete(); return result; }
+    if (result) { streamFinalized = true; streamController.handleComplete(); return result; }
   }
 
   // True non-streaming response
   if (!stream) {
     const result = await handleNonStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, reqLogger, toolNameMap, customToolNames, trackDone, appendLog });
+    streamFinalized = true;
     streamController.handleComplete();
     return result;
   }
 
   // Streaming response
-  const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
+  const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx, onStreamFinalized: () => { streamFinalized = true; } });
   return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
 }
 

@@ -12,6 +12,7 @@ import { extractReasoningText } from "../../translator/concerns/reasoning.js";
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
+import { updateRequestLogStage } from "@/lib/requestFileLogger.js";
 
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
@@ -186,7 +187,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log, requestLogId, triggerW2Sync }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -232,7 +233,32 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       // Client is Responses API → return as-is
       if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
-        return { success: true, response: new Response(JSON.stringify(restoreToolNames(jsonResponse, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+        const finalClientResp = restoreToolNames(jsonResponse, toolNameMap);
+        if (requestLogId) {
+          updateRequestLogStage(
+            requestLogId,
+            "response",
+            {
+              type: "sse-to-json",
+              statusCode: 200,
+              content: textContent || null,
+              thinking: null,
+              finishReason: jsonResponse.status || "completed",
+              usage: { prompt_tokens: inTokensForLog, completion_tokens: usage.output_tokens || 0 },
+              providerResponse: jsonResponse,
+              clientResponse: finalClientResp,
+              error: null,
+            },
+            {
+              status: "success",
+              statusCode: 200,
+              latency: { ttft: totalLatency, total: totalLatency },
+              tokens: { prompt_tokens: inTokensForLog, completion_tokens: usage.output_tokens || 0 },
+            }
+          ).catch(() => {});
+        }
+        triggerW2Sync?.();
+        return { success: true, response: new Response(JSON.stringify(finalClientResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
       // Build client-format response.
@@ -292,9 +318,38 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         finalResp = openAICompletionToClaudeMessage(finalResp);
       }
 
-      return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalResp, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+      const finalClientResp = restoreToolNames(finalResp, toolNameMap);
+      if (requestLogId) {
+        updateRequestLogStage(
+          requestLogId,
+          "response",
+          {
+            type: "sse-to-json",
+            statusCode: 200,
+            content: textContent || null,
+            thinking: null,
+            finishReason: jsonResponse.status || "completed",
+            usage: { prompt_tokens: inTokensForLog, completion_tokens: usage.output_tokens || 0 },
+            providerResponse: jsonResponse,
+            clientResponse: finalClientResp,
+            error: null,
+          },
+          {
+            status: "success",
+            statusCode: 200,
+            latency: { ttft: totalLatency, total: totalLatency },
+            tokens: { prompt_tokens: inTokensForLog, completion_tokens: usage.output_tokens || 0 },
+          }
+        ).catch(() => {});
+      }
+      triggerW2Sync?.();
+
+      return { success: true, response: new Response(JSON.stringify(finalClientResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
+      if (requestLogId) {
+        updateRequestLogStage(requestLogId, "response", { type: "sse-to-json", statusCode: HTTP_STATUS.BAD_GATEWAY, error: err?.message || "Failed to convert streaming response to JSON" }, { status: "error", statusCode: HTTP_STATUS.BAD_GATEWAY, latency: { ttft: 0, total: Date.now() - requestStartTime } }).catch(() => {});
+      }
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
     }
   }
@@ -303,7 +358,12 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   try {
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
-    if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
+    if (!parsed) {
+      if (requestLogId) {
+        updateRequestLogStage(requestLogId, "response", { type: "sse-to-json", statusCode: HTTP_STATUS.BAD_GATEWAY, error: "Invalid SSE response for non-streaming request" }, { status: "error", statusCode: HTTP_STATUS.BAD_GATEWAY, latency: { ttft: 0, total: Date.now() - requestStartTime } }).catch(() => {});
+      }
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
+    }
     if (parsed.error) {
       // Structured error chunks may carry the real upstream status (e.g. the
       // Qoder executor emits status 403 for billing envelopes). Preserve it so
@@ -313,6 +373,9 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       const status = Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus <= 599
         ? upstreamStatus
         : HTTP_STATUS.BAD_GATEWAY;
+      if (requestLogId) {
+        updateRequestLogStage(requestLogId, "response", { type: "sse-to-json", statusCode: status, error: parsed.error.message || "Upstream SSE stream failed", providerResponse: parsed }, { status: "error", statusCode: status, latency: { ttft: 0, total: Date.now() - requestStartTime } }).catch(() => {});
+      }
       return createErrorResult(
         status,
         parsed.error.message || "Upstream SSE stream failed"
@@ -372,9 +435,38 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         ? openAICompletionToClaudeMessage(parsed)
         : parsed;
 
-    return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalBody, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+    const finalClientResp = restoreToolNames(finalBody, toolNameMap);
+    if (requestLogId) {
+      updateRequestLogStage(
+        requestLogId,
+        "response",
+        {
+          type: "sse-to-json",
+          statusCode: 200,
+          content: parsed.choices?.[0]?.message?.content ?? null,
+          thinking: parsed.choices?.[0]?.message?.reasoning_content ?? null,
+          finishReason: parsed.choices?.[0]?.finish_reason || "stop",
+          usage,
+          providerResponse: parsed,
+          clientResponse: finalClientResp,
+          error: null,
+        },
+        {
+          status: "success",
+          statusCode: 200,
+          latency: { ttft: totalLatency, total: totalLatency },
+          tokens: usage,
+        }
+      ).catch(() => {});
+    }
+    triggerW2Sync?.();
+
+    return { success: true, response: new Response(JSON.stringify(finalClientResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
     console.error("[ChatCore] Chat Completions SSE→JSON failed:", err);
+    if (requestLogId) {
+      updateRequestLogStage(requestLogId, "response", { type: "sse-to-json", statusCode: HTTP_STATUS.BAD_GATEWAY, error: err?.message || "Failed to convert streaming response to JSON" }, { status: "error", statusCode: HTTP_STATUS.BAD_GATEWAY, latency: { ttft: 0, total: Date.now() - requestStartTime } }).catch(() => {});
+    }
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
   }
 }

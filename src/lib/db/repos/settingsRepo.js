@@ -47,6 +47,13 @@ const DEFAULT_SETTINGS = {
   outboundProxyEnabled: false,
   outboundProxyUrl: "",
   outboundNoProxy: "",
+  w2AutoProxyEnabled: true,
+  w2AutoProxyUrl: "http://127.0.0.1:8899",
+  builtinProxyEnabled: true,
+  builtinProxyPort: 20129,
+  builtinProxyScriptEnabled: true,
+  builtinProxyScript: "",
+  builtinProxyInterceptHosts: ["*"],
   mitmRouterBaseUrl: DEFAULT_MITM_ROUTER_BASE,
   dnsToolEnabled: {},
   rtkEnabled: true,
@@ -63,6 +70,8 @@ const DEFAULT_SETTINGS = {
   customPrompt: "",
   // REA allow: replace built-in security-policy paragraphs with REA guidance.
   reaAllowEnabled: false,
+  // Skills optimizer: "off" | "compact" | "on-demand" for <available_skills> blocks in prompts.
+  skillsOptimizerMode: "off",
   pxpipeEnabled: false,
   pxpipeAutoInstall: true,
   pxpipeMinChars: 25000,

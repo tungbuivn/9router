@@ -1,0 +1,14 @@
+# 9Router ACP & Upstream Sysprompt Capture / Rewrite Rules for Whistle (w2)
+# Enable HTTPS & SSE stream capture for Antigravity / Gemini CloudCode
+daily-cloudcode-pa.googleapis.com enable://capture enable://captureStream
+cloudcode-pa.googleapis.com enable://capture enable://captureStream
+
+# Route Antigravity / CloudCode generation requests through 9router-sysprompt whistle.script
+https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent script://9router-sysprompt
+https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent script://9router-sysprompt
+
+# Optional: Uncomment to apply 9router-sysprompt to other upstream endpoints
+# (Note: kept commented for Kiro so it does not conflict with existing `script://kiro9` rule)
+# https://runtime.us-east-1.kiro.dev/v1/responses script://9router-sysprompt
+# https://api.anthropic.com/v1/messages script://9router-sysprompt
+# https://api.openai.com/v1/chat/completions script://9router-sysprompt

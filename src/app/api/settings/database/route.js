@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { exportDb, getSettings, importDb } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
+import { setW2AutoProxyConfig } from "open-sse/utils/w2Proxy.js";
+import { syncBuiltinProxyState } from "open-sse/utils/builtinProxy.js";
 import { verifyDashboardPassword } from "@/lib/auth/dashboardSession";
 
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
@@ -36,6 +38,8 @@ export async function POST(request) {
     try {
       const settings = await getSettings();
       applyOutboundProxyEnv(settings);
+      setW2AutoProxyConfig(settings);
+      await syncBuiltinProxyState(settings);
     } catch (err) {
       console.warn("[Settings][DatabaseImport] Failed to re-apply outbound proxy env:", err);
     }

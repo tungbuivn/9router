@@ -4,7 +4,7 @@ import { useState } from "react";
 import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
-function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting }) {
+function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onDisable, onTest, testStatus, isTesting }) {
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -60,21 +60,51 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
           )}
         </div>
       </div>
-      <button
-        onClick={onDeleteAlias}
-        className="p-1 hover:bg-red-50 rounded text-red-500"
-        title="Remove model"
-      >
-        <span className="material-symbols-outlined text-sm">delete</span>
-      </button>
+      <div className="flex items-center gap-1 shrink-0">
+        {onDisable && (
+          <button
+            onClick={onDisable}
+            className="p-1 hover:bg-amber-500/10 rounded text-text-muted hover:text-amber-500 transition-colors"
+            title="Disable model"
+          >
+            <span className="material-symbols-outlined text-sm">block</span>
+          </button>
+        )}
+        <button
+          onClick={onDeleteAlias}
+          className="p-1 hover:bg-red-500/10 rounded text-red-500 transition-colors"
+          title="Remove model"
+        >
+          <span className="material-symbols-outlined text-sm">delete</span>
+        </button>
+      </div>
     </div>
   );
 }
 
-export default function CompatibleModelsSection({ providerStorageAlias, providerDisplayAlias, modelAliases, customModels, copied, onCopy, onDeleteAlias, onAddCustomModel, onDeleteCustomModel, connections, isAnthropic }) {
+export default function CompatibleModelsSection({
+  providerStorageAlias,
+  providerDisplayAlias,
+  modelAliases,
+  customModels,
+  copied,
+  onCopy,
+  onDeleteAlias,
+  onAddCustomModel,
+  onRefreshCustomModels,
+  onDeleteCustomModel,
+  disabledModelIds = [],
+  onDisableModel,
+  onEnableModel,
+  connections,
+  isAnthropic,
+  isAcp,
+  nodeModels,
+}) {
   const [newModel, setNewModel] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importStatus, setImportStatus] = useState(null);
   const [testingModelId, setTestingModelId] = useState(null);
   const [modelTestResults, setModelTestResults] = useState({});
 
@@ -96,12 +126,25 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
     }
   };
 
-  const allModels = getProviderCustomModelRows({
+  const baseModels = getProviderCustomModelRows({
     customModels,
     modelAliases,
     providerAlias: providerStorageAlias,
     type: "llm",
   });
+  const nodeModelRows = (nodeModels || []).map((m) => {
+    const mId = typeof m === "string" ? m : (m.id || m.name);
+    return {
+      id: mId,
+      alias: mId,
+      source: "node",
+    };
+  });
+  const seenIds = new Set(baseModels.map((m) => m.id));
+  const allModels = [
+    ...baseModels,
+    ...nodeModelRows.filter((m) => !seenIds.has(m.id)),
+  ];
 
   const handleAdd = async () => {
     if (!newModel.trim() || adding) return;
@@ -128,31 +171,53 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
     if (!activeConnection) return;
 
     setImporting(true);
+    setImportStatus(null);
     try {
-      const res = await fetch(`/api/providers/${activeConnection.id}/models`);
+      const res = await fetch(`/api/providers/${activeConnection.id}/models${isAcp ? "?refresh=1" : ""}`, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error || "Failed to import models");
+        setImportStatus({ type: "error", text: data.error || "Failed to fetch models" });
         return;
       }
       const models = data.models || [];
       if (models.length === 0) {
-        alert("No models returned from /models.");
+        setImportStatus({
+          type: "error",
+          text: data.discoveryError ? `No models returned: ${data.discoveryError}` : "No models returned from server.",
+        });
         return;
       }
-      let importedCount = 0;
+      const existingIds = new Set(allModels.map((entry) => entry.id));
+      const newModelIds = [];
       for (const model of models) {
         const modelId = model.id || model.name || model.model;
-        if (!modelId) continue;
-        if (allModels.some((entry) => entry.id === modelId)) continue;
-        await onAddCustomModel(modelId);
-        importedCount += 1;
+        if (!modelId || existingIds.has(modelId)) continue;
+        existingIds.add(modelId);
+        newModelIds.push(modelId);
       }
-      if (importedCount === 0) {
-        alert("No new models were added.");
+      if (newModelIds.length === 0) {
+        setImportStatus({
+          type: data.discoveryError ? "error" : "info",
+          text: data.discoveryError
+            ? `Discovery failed: ${data.discoveryError}`
+            : `All ${models.length} models from server are already added.`,
+        });
+        return;
       }
+      for (const modelId of newModelIds) {
+        await onAddCustomModel(modelId, { skipRefresh: !!onRefreshCustomModels, silent: true });
+      }
+      if (onRefreshCustomModels) {
+        await onRefreshCustomModels();
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+      }
+      setImportStatus({
+        type: "success",
+        text: `Fetched and added ${newModelIds.length} models (total ${models.length} discovered).`,
+      });
     } catch (error) {
       console.log("Error importing models:", error);
+      setImportStatus({ type: "error", text: error.message || "Error fetching models" });
     } finally {
       setImporting(false);
     }
@@ -163,7 +228,9 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-text-muted">
-        Add {isAnthropic ? "Anthropic" : "OpenAI"}-compatible models manually or import them from the /models endpoint.
+        {isAcp
+          ? "Manage models available for this ACP Server or add custom model mappings."
+          : `Add ${isAnthropic ? "Anthropic" : "OpenAI"}-compatible models manually or import them from the /models endpoint.`}
       </p>
 
       <div className="flex items-end gap-2 flex-wrap">
@@ -175,7 +242,7 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
             value={newModel}
             onChange={(e) => setNewModel(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-            placeholder={isAnthropic ? "claude-3-opus-20240229" : "gpt-4o"}
+            placeholder={isAcp ? "gemini-3.8-flash" : isAnthropic ? "claude-3-opus-20240229" : "gpt-4o"}
             className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
           />
         </div>
@@ -183,9 +250,21 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
           {adding ? "Adding..." : "Add"}
         </Button>
         <Button size="sm" variant="secondary" icon="download" onClick={handleImport} disabled={!canImport || importing}>
-          {importing ? "Importing..." : "Import from /models"}
+          {importing ? (isAcp ? "Fetching..." : "Importing...") : (isAcp ? "Fetch Models" : "Import from /models")}
         </Button>
       </div>
+
+      {importStatus && (
+        <p className={`text-xs ${
+          importStatus.type === "error"
+            ? "text-red-500"
+            : importStatus.type === "success"
+              ? "text-emerald-600 dark:text-emerald-400"
+              : "text-text-muted"
+        }`}>
+          {importStatus.text}
+        </p>
+      )}
 
       {!canImport && (
         <p className="text-xs text-text-muted">
@@ -193,23 +272,58 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
         </p>
       )}
 
-      {allModels.length > 0 && (
-        <div className="flex flex-col gap-3">
-          {allModels.map(({ id, alias, source }) => (
-            <CompatibleModelRow
-              key={`${source}-${providerStorageAlias}/${id}`}
-              modelId={id}
-              fullModel={`${providerDisplayAlias}/${id}`}
-              copied={copied}
-              onCopy={onCopy}
-              onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias)}
-              onTest={connections.length > 0 ? () => handleTestModel(id) : undefined}
-              testStatus={modelTestResults[id]}
-              isTesting={testingModelId === id}
-            />
-          ))}
-        </div>
-      )}
+      {(() => {
+        const disabledSet = new Set(disabledModelIds || []);
+        const activeModels = allModels.filter((m) => !disabledSet.has(m.id));
+        const disabledModels = allModels.filter((m) => disabledSet.has(m.id));
+        const extraDisabledIds = (disabledModelIds || []).filter((id) => !allModels.some((m) => m.id === id));
+        const allDisabledItems = [
+          ...disabledModels.map((m) => m.id),
+          ...extraDisabledIds,
+        ];
+
+        return (
+          <>
+            {activeModels.length > 0 && (
+              <div className="flex flex-col gap-3">
+                {activeModels.map(({ id, alias, source }) => (
+                  <CompatibleModelRow
+                    key={`${source}-${providerStorageAlias}/${id}`}
+                    modelId={id}
+                    fullModel={`${providerDisplayAlias}/${id}`}
+                    copied={copied}
+                    onCopy={onCopy}
+                    onDisable={onDisableModel ? () => onDisableModel(id) : undefined}
+                    onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias)}
+                    onTest={connections.length > 0 ? () => handleTestModel(id) : undefined}
+                    testStatus={modelTestResults[id]}
+                    isTesting={testingModelId === id}
+                  />
+                ))}
+              </div>
+            )}
+
+            {allDisabledItems.length > 0 && (
+              <div className="w-full mt-2">
+                <p className="text-xs text-text-muted mb-2">Disabled models ({allDisabledItems.length}):</p>
+                <div className="flex flex-wrap gap-2">
+                  {allDisabledItems.map((id) => (
+                    <button
+                      key={id}
+                      onClick={() => onEnableModel && onEnableModel(id)}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-dashed border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
+                      title="Restore model"
+                    >
+                      <span className="material-symbols-outlined text-[13px]">add</span>
+                      {id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

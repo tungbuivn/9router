@@ -81,6 +81,29 @@ export default function ProfilePage() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
 
+  const [w2ProxyForm, setW2ProxyForm] = useState({
+    w2AutoProxyEnabled: true,
+    w2AutoProxyUrl: "http://127.0.0.1:8899",
+  });
+  const [w2ProxyLoading, setW2ProxyLoading] = useState(false);
+  const [w2ProbeLoading, setW2ProbeLoading] = useState(false);
+  const [w2ScriptLoading, setW2ScriptLoading] = useState(false);
+  const [w2ProxyStatus, setW2ProxyStatus] = useState({ type: "", message: "" });
+  const [w2LiveState, setW2LiveState] = useState(null);
+
+  const [builtinProxyForm, setBuiltinProxyForm] = useState({
+    builtinProxyEnabled: true,
+    builtinProxyPort: 20129,
+    builtinProxyScriptEnabled: true,
+    builtinProxyScript: "",
+    builtinProxyInterceptHosts: "*",
+  });
+  const [builtinProxyLive, setBuiltinProxyLive] = useState(null);
+  const [builtinProxyLoading, setBuiltinProxyLoading] = useState(false);
+  const [builtinScriptTesting, setBuiltinScriptTesting] = useState(false);
+  const [builtinProxyStatus, setBuiltinProxyStatus] = useState({ type: "", message: "" });
+  const [builtinTestResult, setBuiltinTestResult] = useState(null);
+
   const [isRemoteHost, setIsRemoteHost] = useState(false);
   useEffect(() => {
     if (typeof window !== "undefined")
@@ -122,6 +145,31 @@ export default function ProfilePage() {
           outboundProxyUrl: data?.outboundProxyUrl || "",
           outboundNoProxy: data?.outboundNoProxy || "",
         });
+        setW2ProxyForm({
+          w2AutoProxyEnabled: data?.w2AutoProxyEnabled !== false,
+          w2AutoProxyUrl: data?.w2AutoProxyUrl || "http://127.0.0.1:8899",
+        });
+        setBuiltinProxyForm((prev) => ({
+          ...prev,
+          builtinProxyEnabled: data?.builtinProxyEnabled !== false,
+          builtinProxyPort: data?.builtinProxyPort || 20129,
+          builtinProxyScriptEnabled: data?.builtinProxyScriptEnabled !== false,
+          builtinProxyScript: data?.builtinProxyScript || prev.builtinProxyScript,
+          builtinProxyInterceptHosts: Array.isArray(data?.builtinProxyInterceptHosts)
+            ? data.builtinProxyInterceptHosts.join(", ")
+            : (data?.builtinProxyInterceptHosts || "*"),
+        }));
+        fetch("/api/settings/builtin-proxy", { cache: "no-store" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((bp) => {
+            if (!bp) return;
+            setBuiltinProxyLive(bp);
+            setBuiltinProxyForm((prev) => ({
+              ...prev,
+              builtinProxyScript: prev.builtinProxyScript || bp.script || bp.defaultScript || "",
+            }));
+          })
+          .catch(() => {});
         setLoading(false);
       })
       .catch((err) => {
@@ -224,6 +272,235 @@ export default function ProfilePage() {
       setProxyStatus({ type: "error", message: "An error occurred" });
     } finally {
       setProxyLoading(false);
+    }
+  };
+
+  const updateW2AutoProxyEnabled = async (w2AutoProxyEnabled) => {
+    setW2ProxyLoading(true);
+    setW2ProxyStatus({ type: "", message: "" });
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ w2AutoProxyEnabled }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setW2ProxyForm((prev) => ({ ...prev, w2AutoProxyEnabled: data?.w2AutoProxyEnabled !== false }));
+        setW2ProxyStatus({
+          type: "success",
+          message: w2AutoProxyEnabled
+            ? "W2 auto-capture proxy enabled (applies to non-local app & ACP requests)"
+            : "W2 auto-capture proxy disabled",
+        });
+      } else {
+        setW2ProxyStatus({ type: "error", message: data.error || "Failed to update W2 proxy setting" });
+      }
+    } catch {
+      setW2ProxyStatus({ type: "error", message: "An error occurred" });
+    } finally {
+      setW2ProxyLoading(false);
+    }
+  };
+
+  const updateW2AutoProxyUrl = async (e) => {
+    e.preventDefault();
+    setW2ProxyLoading(true);
+    setW2ProxyStatus({ type: "", message: "" });
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ w2AutoProxyUrl: w2ProxyForm.w2AutoProxyUrl.trim() || "http://127.0.0.1:8899" }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setW2ProxyForm((prev) => ({ ...prev, w2AutoProxyUrl: data?.w2AutoProxyUrl || "http://127.0.0.1:8899" }));
+        setW2ProxyStatus({ type: "success", message: "W2 proxy URL saved" });
+      } else {
+        setW2ProxyStatus({ type: "error", message: data.error || "Failed to save W2 proxy URL" });
+      }
+    } catch {
+      setW2ProxyStatus({ type: "error", message: "An error occurred" });
+    } finally {
+      setW2ProxyLoading(false);
+    }
+  };
+
+  const checkW2ProxyStatus = async () => {
+    setW2ProbeLoading(true);
+    setW2ProxyStatus({ type: "", message: "" });
+    try {
+      const target = (w2ProxyForm.w2AutoProxyUrl || "http://127.0.0.1:8899").trim();
+      const res = await fetch(`/api/settings/w2-proxy-status?url=${encodeURIComponent(target)}`, { cache: "no-store" });
+      const data = await res.json();
+      setW2LiveState(data);
+      if (res.ok && data?.active) {
+        setW2ProxyStatus({
+          type: "success",
+          message: `W2 proxy ACTIVE at ${data.url} (${data.elapsedMs}ms)${data.caCertPath ? ` · CA: ${data.caCertPath}` : ""}`,
+        });
+      } else {
+        setW2ProxyStatus({
+          type: "error",
+          message: `W2 proxy NOT running at ${data?.url || target} — traffic will go direct`,
+        });
+      }
+    } catch {
+      setW2ProxyStatus({ type: "error", message: "Failed to probe W2 proxy" });
+    } finally {
+      setW2ProbeLoading(false);
+    }
+  };
+
+  const installW2ScriptPlugin = async () => {
+    setW2ScriptLoading(true);
+    setW2ProxyStatus({ type: "", message: "" });
+    try {
+      const target = (w2ProxyForm.w2AutoProxyUrl || "http://127.0.0.1:8899").trim();
+      const res = await fetch("/api/settings/w2-script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ w2Url: target, enableRule: false }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        setW2ProxyStatus({
+          type: "success",
+          message: `Installed '${data.scriptName}' + rule '${data.ruleName}' into Whistle (${data.w2Url}). Edit & enable in Whistle UI.`,
+        });
+      } else {
+        setW2ProxyStatus({
+          type: "error",
+          message: data?.error || "Failed to install W2 script plugin (is w2 running?)",
+        });
+      }
+    } catch {
+      setW2ProxyStatus({ type: "error", message: "Failed to install W2 script plugin" });
+    } finally {
+      setW2ScriptLoading(false);
+    }
+  };
+
+  const refreshBuiltinProxyStatus = async () => {
+    try {
+      const res = await fetch("/api/settings/builtin-proxy", { cache: "no-store" });
+      if (res.ok) {
+        const bp = await res.json();
+        setBuiltinProxyLive(bp);
+        return bp;
+      }
+    } catch {}
+    return null;
+  };
+
+  const updateBuiltinProxyEnabled = async (builtinProxyEnabled) => {
+    setBuiltinProxyLoading(true);
+    setBuiltinProxyStatus({ type: "", message: "" });
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ builtinProxyEnabled }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setBuiltinProxyForm((prev) => ({ ...prev, builtinProxyEnabled: data?.builtinProxyEnabled !== false }));
+        const bp = await refreshBuiltinProxyStatus();
+        setBuiltinProxyStatus({
+          type: "success",
+          message: builtinProxyEnabled
+            ? `Built-in Interceptor Proxy RUNNING on ${bp?.url || `http://127.0.0.1:${builtinProxyForm.builtinProxyPort}`}`
+            : "Built-in Interceptor Proxy stopped (falling back to W2 or direct)",
+        });
+      } else {
+        setBuiltinProxyStatus({ type: "error", message: data?.error || "Failed to update Built-in Proxy" });
+      }
+    } catch {
+      setBuiltinProxyStatus({ type: "error", message: "An error occurred" });
+    } finally {
+      setBuiltinProxyLoading(false);
+    }
+  };
+
+  const saveBuiltinProxyConfig = async (e) => {
+    e?.preventDefault?.();
+    setBuiltinProxyLoading(true);
+    setBuiltinProxyStatus({ type: "", message: "" });
+    try {
+      const port = Number.parseInt(String(builtinProxyForm.builtinProxyPort || 20129), 10) || 20129;
+      const hosts = String(builtinProxyForm.builtinProxyInterceptHosts || "*")
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          builtinProxyPort: port,
+          builtinProxyScriptEnabled: builtinProxyForm.builtinProxyScriptEnabled,
+          builtinProxyScript: builtinProxyForm.builtinProxyScript,
+          builtinProxyInterceptHosts: hosts.length > 0 ? hosts : ["*"],
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        await refreshBuiltinProxyStatus();
+        setBuiltinProxyStatus({ type: "success", message: "Built-in Interceptor Proxy config & script applied" });
+      } else {
+        setBuiltinProxyStatus({ type: "error", message: data?.error || "Failed to save config" });
+      }
+    } catch {
+      setBuiltinProxyStatus({ type: "error", message: "An error occurred" });
+    } finally {
+      setBuiltinProxyLoading(false);
+    }
+  };
+
+  const testBuiltinProxyScript = async () => {
+    setBuiltinScriptTesting(true);
+    setBuiltinTestResult(null);
+    try {
+      const res = await fetch("/api/settings/builtin-proxy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "test-script",
+          script: builtinProxyForm.builtinProxyScript,
+        }),
+      });
+      const data = await res.json();
+      setBuiltinTestResult(data);
+    } catch (err) {
+      setBuiltinTestResult({ ok: false, error: err?.message || "Dry-run failed" });
+    } finally {
+      setBuiltinScriptTesting(false);
+    }
+  };
+
+  const resetBuiltinProxyScript = async () => {
+    setBuiltinProxyLoading(true);
+    setBuiltinProxyStatus({ type: "", message: "" });
+    try {
+      const res = await fetch("/api/settings/builtin-proxy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reset-script" }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.status) {
+        setBuiltinProxyLive(data.status);
+        setBuiltinProxyForm((prev) => ({ ...prev, builtinProxyScript: data.status.script || data.status.defaultScript || "" }));
+        setBuiltinProxyStatus({ type: "success", message: "Reset script to default template" });
+      }
+    } catch {
+      setBuiltinProxyStatus({ type: "error", message: "Failed to reset script" });
+    } finally {
+      setBuiltinProxyLoading(false);
     }
   };
 
@@ -1595,6 +1872,235 @@ export default function ProfilePage() {
                 {proxyStatus.message}
               </p>
             )}
+
+            {/* Built-in Interceptor Proxy (Self-contained MITM + JS Script) */}
+            <div className="pt-4 mt-2 border-t border-border/50 flex flex-col gap-3">
+              <div className="flex items-start sm:items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-medium text-sm sm:text-base">Built-in Interceptor Proxy</p>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                        builtinProxyLive?.running
+                          ? "bg-green-500/15 text-green-600 dark:text-green-400"
+                          : "bg-surface-2 text-text-muted"
+                      }`}
+                    >
+                      {builtinProxyLive?.running ? `RUNNING :${builtinProxyLive.port}` : "STOPPED"}
+                    </span>
+                    {builtinProxyLive?.stats && (
+                      <span className="text-[11px] font-mono text-text-muted">
+                        Captured: {builtinProxyLive.stats.totalCaptured || 0} · Modified: {builtinProxyLive.stats.totalModified || 0}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    Self-contained MITM proxy + in-process hook (no external w2 needed). Captures &amp; decrypts all non-local ACP and provider requests, runs your JS sysprompt/request modifier script, and logs 1-to-1 into <strong>/dashboard/logs → Tab 5 (Upstream Proxy)</strong>.
+                  </p>
+                </div>
+                <Toggle
+                  checked={settings.builtinProxyEnabled !== false}
+                  onChange={() => updateBuiltinProxyEnabled(!(settings.builtinProxyEnabled !== false))}
+                  disabled={loading || builtinProxyLoading}
+                />
+              </div>
+
+              {settings.builtinProxyEnabled !== false && (
+                <form onSubmit={saveBuiltinProxyConfig} className="flex flex-col gap-3 pt-2 border-t border-border/50">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="font-medium text-xs sm:text-sm">Local MITM Port</label>
+                      <Input
+                        type="number"
+                        placeholder="20129"
+                        value={String(builtinProxyForm.builtinProxyPort)}
+                        onChange={(e) => setBuiltinProxyForm((prev) => ({ ...prev, builtinProxyPort: e.target.value }))}
+                        disabled={loading || builtinProxyLoading}
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1.5 sm:col-span-2">
+                      <label className="font-medium text-xs sm:text-sm">Intercept Hosts (wildcard globs, <code>*</code> = all non-local)</label>
+                      <Input
+                        placeholder="*"
+                        value={builtinProxyForm.builtinProxyInterceptHosts}
+                        onChange={(e) => setBuiltinProxyForm((prev) => ({ ...prev, builtinProxyInterceptHosts: e.target.value }))}
+                        disabled={loading || builtinProxyLoading}
+                      />
+                    </div>
+                  </div>
+
+                  {builtinProxyLive?.caBundlePath && (
+                    <p className="text-[11px] font-mono text-text-muted break-all">
+                      CA Bundle (auto-injected into ACP): {builtinProxyLive.caBundlePath}
+                    </p>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1">
+                    <label className="font-medium text-xs sm:text-sm">JS Interceptor Script (<code>transformRequest(ctx)</code>)</label>
+                    <div className="flex items-center gap-2 text-xs text-text-muted">
+                      <span>Script active</span>
+                      <Toggle
+                        size="sm"
+                        checked={builtinProxyForm.builtinProxyScriptEnabled}
+                        onChange={() =>
+                          setBuiltinProxyForm((prev) => ({
+                            ...prev,
+                            builtinProxyScriptEnabled: !prev.builtinProxyScriptEnabled,
+                          }))
+                        }
+                        disabled={loading || builtinProxyLoading}
+                      />
+                    </div>
+                  </div>
+
+                  <textarea
+                    rows={12}
+                    spellCheck={false}
+                    value={builtinProxyForm.builtinProxyScript}
+                    onChange={(e) => setBuiltinProxyForm((prev) => ({ ...prev, builtinProxyScript: e.target.value }))}
+                    disabled={loading || builtinProxyLoading}
+                    className="w-full rounded-lg border border-border bg-bg p-3 font-mono text-xs text-text-main focus:outline-none focus:border-primary/60 custom-scrollbar"
+                  />
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button type="submit" variant="primary" loading={builtinProxyLoading}>
+                      Save &amp; Apply
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      loading={builtinScriptTesting}
+                      disabled={loading || builtinProxyLoading}
+                      onClick={testBuiltinProxyScript}
+                    >
+                      Test Script (Dry-Run)
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={loading || builtinProxyLoading}
+                      onClick={resetBuiltinProxyScript}
+                    >
+                      Reset Template
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={loading || builtinProxyLoading}
+                      onClick={refreshBuiltinProxyStatus}
+                    >
+                      Refresh Status
+                    </Button>
+                  </div>
+
+                  {builtinTestResult && (
+                    <div
+                      className={`p-3 rounded-lg border text-xs font-mono space-y-1 ${
+                        builtinTestResult.error
+                          ? "border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400"
+                          : "border-primary/30 bg-primary/5 text-text-main"
+                      }`}
+                    >
+                      <div>
+                        Dry-Run: {builtinTestResult.error ? `ERROR: ${builtinTestResult.error}` : builtinTestResult.modified ? "MODIFIED" : "PASSTHROUGH (unchanged)"} · format={builtinTestResult.sysFormat || "-"} · sysprompt: {builtinTestResult.beforeSysPromptChars ?? 0} → {builtinTestResult.afterSysPromptChars ?? 0} chars ({builtinTestResult.durationMs ?? 0}ms)
+                      </div>
+                      {Array.isArray(builtinTestResult.logs) && builtinTestResult.logs.length > 0 && (
+                        <div className="text-text-muted">Logs: {builtinTestResult.logs.join(" | ")}</div>
+                      )}
+                    </div>
+                  )}
+                </form>
+              )}
+
+              {builtinProxyStatus.message && (
+                <p className={`text-xs sm:text-sm ${builtinProxyStatus.type === "error" ? "text-amber-500" : "text-green-500"}`}>
+                  {builtinProxyStatus.message}
+                </p>
+              )}
+            </div>
+
+            {/* W2 (Whistle) Auto Capture Proxy */}
+            <div className="pt-4 mt-2 border-t border-border/50 flex flex-col gap-3">
+              <div className="flex items-start sm:items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-sm sm:text-base">W2 Auto Capture Proxy</p>
+                    {w2LiveState && (
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                          w2LiveState.active
+                            ? "bg-green-500/15 text-green-600 dark:text-green-400"
+                            : "bg-surface-2 text-text-muted"
+                        }`}
+                      >
+                        {w2LiveState.active ? "ACTIVE" : "OFFLINE"}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    Check w2 proxy (default 127.0.0.1:8899) on every request. When active, route non-local app &amp; ACP requests through w2 to capture traffic (localhost/127.0.0.1 always bypassed).
+                  </p>
+                </div>
+                <Toggle
+                  checked={settings.w2AutoProxyEnabled !== false}
+                  onChange={() => updateW2AutoProxyEnabled(!(settings.w2AutoProxyEnabled !== false))}
+                  disabled={loading || w2ProxyLoading}
+                />
+              </div>
+
+              {settings.w2AutoProxyEnabled !== false && (
+                <form onSubmit={updateW2AutoProxyUrl} className="flex flex-col gap-3 pt-2 border-t border-border/50">
+                  <div className="flex flex-col gap-2">
+                    <label className="font-medium text-sm sm:text-base">W2 Proxy URL</label>
+                    <Input
+                      placeholder="http://127.0.0.1:8899"
+                      value={w2ProxyForm.w2AutoProxyUrl}
+                      onChange={(e) => setW2ProxyForm((prev) => ({ ...prev, w2AutoProxyUrl: e.target.value }))}
+                      disabled={loading || w2ProxyLoading}
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      loading={w2ProbeLoading}
+                      disabled={loading || w2ProxyLoading || w2ScriptLoading}
+                      onClick={checkW2ProxyStatus}
+                      className="w-full sm:w-auto"
+                    >
+                      Check W2 Status
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      loading={w2ScriptLoading}
+                      disabled={loading || w2ProxyLoading || w2ProbeLoading}
+                      onClick={installW2ScriptPlugin}
+                      className="w-full sm:w-auto"
+                    >
+                      Install Sysprompt Script
+                    </Button>
+                    <Button type="submit" variant="primary" loading={w2ProxyLoading} className="w-full sm:w-auto">
+                      Apply
+                    </Button>
+                    <a
+                      href={`${(w2ProxyForm.w2AutoProxyUrl || "http://127.0.0.1:8899").trim()}/plugin.script/`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs font-medium text-primary hover:underline px-1"
+                    >
+                      Open Whistle Script UI ↗
+                    </a>
+                  </div>
+                </form>
+              )}
+
+              {w2ProxyStatus.message && (
+                <p className={`text-xs sm:text-sm ${w2ProxyStatus.type === "error" ? "text-amber-500" : "text-green-500"}`}>
+                  {w2ProxyStatus.message}
+                </p>
+              )}
+            </div>
           </div>
         </Card>
 

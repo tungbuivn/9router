@@ -75,9 +75,51 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
 
     if (connections.length === 0) {
+      if (typeof providerId === "string") {
+        try {
+          const { getProviderNodeById, getProviderNodes } = await import("@/lib/localDb");
+          let node = null;
+          if (providerId.startsWith("acp-")) {
+            node = await getProviderNodeById(providerId);
+          }
+          if (!node) {
+            const acpNodes = await getProviderNodes({ type: "acp" });
+            node = acpNodes.find((n) =>
+              n.prefix === providerId ||
+              n.id === providerId ||
+              n.prefix?.replace(/^acp-/, "") === providerId ||
+              n.name?.toLowerCase() === providerId.toLowerCase()
+            ) || null;
+          }
+          if (node) {
+            const nodeConns = await getProviderConnections({ provider: node.id, isActive: true });
+            if (nodeConns.length > 0) {
+              return nodeConns[0];
+            }
+            return {
+              id: `acp-${node.id}`,
+              connectionId: `acp-${node.id}`,
+              connectionName: `${node.name} (ACP Stdio)`,
+              provider: node.id,
+              isActive: true,
+              providerSpecificData: {
+                command: node.command,
+                args: node.args,
+                env: node.env,
+                defaultConfigOptions: node.defaultConfigOptions,
+                prefix: node.prefix,
+                nodeName: node.name,
+                stripSystemPrompt: node.stripSystemPrompt !== false,
+              },
+            };
+          }
+        } catch {}
+      }
       log.warn("AUTH", `No credentials for ${provider}`);
       return null;
     }
+
+    const isAcp = typeof providerId === "string" && providerId.startsWith("acp-");
 
     // Antigravity quota cache is lazy: only populated after that account returns 409/429.
     const isAntigravity = providerId === "antigravity";
@@ -86,7 +128,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
-      if (isModelLockActive(c, model)) return false;
+      if (!isAcp && isModelLockActive(c, model)) return false;
       const enabled = c.providerSpecificData?.enabledModels;
       if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
       // Antigravity: skip if live quota exhausted for this model

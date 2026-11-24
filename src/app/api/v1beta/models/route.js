@@ -1,4 +1,5 @@
 import { PROVIDER_MODELS } from "@/shared/constants/models";
+import { withApiRequestLog } from "@/lib/withApiRequestLog.js";
 
 /**
  * Handle CORS preflight
@@ -17,7 +18,7 @@ export async function OPTIONS() {
  * GET /v1beta/models - Gemini compatible models list
  * Returns models in Gemini API format
  */
-export async function GET() {
+export const GET = withApiRequestLog(async function GET() {
   try {
     const models = [];
     const seen = new Set();
@@ -59,4 +60,4 @@ export async function GET() {
     console.log("Error fetching models:", error);
     return Response.json({ error: { message: error.message } }, { status: 500 });
   }
-}
+}, { apiType: "models" });

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { assertPublicUrl } from "@/shared/utils/ssrfGuard.js";
 import { isLocalRequest } from "@/dashboardGuard";
+import { buildAcpProcessEnv } from "open-sse/utils/w2Proxy.js";
 
 // Fetch with timeout wrapper
 const fetchWithTimeout = (url, options, timeout = 10000) => {
@@ -56,6 +57,105 @@ export async function POST(request) {
   try {
     const body = await request.json();
     const { baseUrl, apiKey, type, modelId } = body;
+
+    // ACP Stdio Validation - test initialize RPC over stdio
+    if (type === "acp") {
+      const { command, args, env: customEnv } = body;
+      if (!command?.trim()) {
+        return NextResponse.json({ valid: false, error: "Command is required" });
+      }
+
+      let parsedArgs = [];
+      if (Array.isArray(args)) {
+        parsedArgs = args.map((a) => String(a).trim()).filter(Boolean);
+      } else if (typeof args === "string" && args.trim()) {
+        parsedArgs = args.trim().split(/\s+/).filter(Boolean);
+      }
+
+      try {
+        const { spawn } = await import("child_process");
+        const { env: spawnEnv } = await buildAcpProcessEnv(process.env, customEnv || {});
+        const result = await new Promise((resolve) => {
+          let child;
+          const timeout = setTimeout(() => {
+            try { if (child && !child.killed) child.kill("SIGTERM"); } catch {}
+            resolve({ valid: false, error: "Timeout waiting for ACP handshake (5s)" });
+          }, 5000);
+
+          try {
+            child = spawn(command.trim(), parsedArgs, {
+              env: spawnEnv,
+              stdio: ["pipe", "pipe", "pipe"],
+              shell: process.platform === "win32",
+            });
+          } catch (spawnErr) {
+            clearTimeout(timeout);
+            return resolve({ valid: false, error: `Spawn error: ${spawnErr.message}` });
+          }
+
+          let buffer = "";
+          let answered = false;
+
+          child.on("error", (err) => {
+            clearTimeout(timeout);
+            if (!answered) {
+              answered = true;
+              resolve({ valid: false, error: `Process error: ${err.message}` });
+            }
+          });
+
+          child.stdout.on("data", (chunk) => {
+            buffer += chunk.toString("utf8");
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const msg = JSON.parse(line.trim());
+                if (msg.result?.protocolVersion !== undefined || msg.result?.agentInfo || msg.result?.agentCapabilities) {
+                  clearTimeout(timeout);
+                  answered = true;
+                  try { child.kill("SIGTERM"); } catch {}
+                  return resolve({
+                    valid: true,
+                    method: "acp_initialize",
+                    agentInfo: msg.result?.agentInfo || { name: "ACP Server" },
+                    protocolVersion: msg.result?.protocolVersion,
+                  });
+                }
+              } catch {}
+            }
+          });
+
+          child.on("close", (code) => {
+            clearTimeout(timeout);
+            if (!answered) {
+              answered = true;
+              resolve({
+                valid: false,
+                error: `Process exited with code ${code} before completing ACP initialize handshake`,
+              });
+            }
+          });
+
+          // Send initialize JSON-RPC
+          const initPayload = JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: 1,
+              clientInfo: { name: "9router", version: "1.0.0" }
+            }
+          }) + "\n";
+          child.stdin.write(initPayload);
+        });
+
+        return NextResponse.json(result);
+      } catch (err) {
+        return NextResponse.json({ valid: false, error: err.message });
+      }
+    }
 
     if (!baseUrl || !apiKey) {
       return NextResponse.json({ error: "Base URL and API key required" }, { status: 400 });

@@ -21,6 +21,50 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: "Prefix is required" }, { status: 400 });
     }
 
+    if (node.type === "acp") {
+      const command = (body.command || node.command || "").trim();
+      if (!command) {
+        return NextResponse.json({ error: "Command is required" }, { status: 400 });
+      }
+      let parsedArgs = node.args || [];
+      if (Array.isArray(body.args)) {
+        parsedArgs = body.args.map((a) => String(a).trim()).filter(Boolean);
+      } else if (typeof body.args === "string") {
+        parsedArgs = body.args.trim().split(/\s+/).filter(Boolean);
+      }
+      const defaultModel = (body.defaultModel || body.defaultConfigOptions?.model || "").trim();
+      const stripSystemPrompt = body.stripSystemPrompt !== undefined
+        ? (body.stripSystemPrompt === true || body.stripSystemPrompt === "true")
+        : (node.stripSystemPrompt !== false);
+      const updates = {
+        name: name.trim(),
+        prefix: prefix.trim(),
+        command,
+        args: parsedArgs,
+        env: body.env !== undefined ? body.env : node.env,
+        defaultConfigOptions: body.defaultConfigOptions || (defaultModel ? { model: defaultModel } : node.defaultConfigOptions),
+        models: body.models || node.models,
+        stripSystemPrompt,
+      };
+      const updated = await updateProviderNode(id, updates);
+      const connections = await getProviderConnections({ provider: id });
+      await Promise.all(connections.map((connection) => (
+        updateProviderConnection(connection.id, {
+          providerSpecificData: {
+            ...(connection.providerSpecificData || {}),
+            prefix: prefix.trim(),
+            command: updated.command,
+            args: updated.args,
+            env: updated.env,
+            defaultConfigOptions: updated.defaultConfigOptions,
+            nodeName: updated.name,
+            stripSystemPrompt: updated.stripSystemPrompt !== false,
+          }
+        })
+      )));
+      return NextResponse.json({ node: updated });
+    }
+
     // Only validate apiType for OpenAI Compatible nodes
     if (node.type === "openai-compatible" && (!apiType || !["chat", "responses"].includes(apiType))) {
       return NextResponse.json({ error: "Invalid OpenAI compatible API type" }, { status: 400 });
