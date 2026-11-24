@@ -51,7 +51,10 @@ const nextConfig = {
     // Cache fetch responses across HMR refreshes for faster dev reloads.
     serverComponentsHmrCache: true,
     // Tree-shake heavy barrel imports to cut compile + bundle size
-    optimizePackageImports: ["@xyflow/react", "@dnd-kit/core", "@dnd-kit/sortable", "material-symbols", "marked"],
+    optimizePackageImports: ["@xyflow/react", "@dnd-kit/core", "@dnd-kit/sortable", "material-symbols", "marked", "recharts"],
+    // Separate worker processes free memory between server and client compilation
+    webpackBuildWorker: true,
+    webpackMemoryOptimizations: true,
   },
   webpack: (config, { isServer }) => {
     // Ignore fs/path modules in browser bundle
