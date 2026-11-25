@@ -20,6 +20,7 @@ import {
   ANTHROPIC_COMPATIBLE_PREFIX,
   ACP_PROVIDER_PREFIX,
   isAcpProvider,
+  AI_PROVIDERS,
 } from "@/shared/constants/providers";
 import Link from "next/link";
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
