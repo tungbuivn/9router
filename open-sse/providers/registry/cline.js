@@ -35,15 +35,19 @@ export default {
       ],
     },
   },
+  // Fallback catalog for when the live endpoints are unreachable. The live list
+  // comes from the cloud catalog + the recommended-models feed — see
+  // services/clinepassModels.js.
   models: [
-    { id: "anthropic/claude-opus-4.7", name: "Claude Opus 4.7" },
-    { id: "anthropic/claude-sonnet-4.6", name: "Claude Sonnet 4.6" },
-    { id: "anthropic/claude-opus-4.6", name: "Claude Opus 4.6" },
-    { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex" },
-    { id: "openai/gpt-5.4", name: "GPT-5.4" },
-    { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
-    { id: "google/gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite Preview" },
+    { id: "anthropic/claude-opus-5.5", name: "Claude Opus 5.5" },
+    { id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5" },
+    { id: "google/gemini-4-argon", name: "Gemini 4 Argon" },
+    { id: "openai/gpt-6-astra", name: "GPT-6 Astra" },
+    { id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol" },
+    { id: "meta/muse-ember", name: "Muse Ember" },
     { id: "kwaipilot/kat-coder-pro", name: "KAT Coder Pro" },
+    { id: "cline-free/nemotron-3.5-super-vl", name: "Nemotron 3.5 Super VL (Free)" },
+    { id: "nvidia/nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning (Free)" },
   ],
   oauth: {
     appBaseUrl: "https://app.cline.bot",

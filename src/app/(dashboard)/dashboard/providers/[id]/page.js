@@ -102,6 +102,7 @@ export default function ProviderDetailPage() {
   const [importingClineModels, setImportingClineModels] = useState(false);
   const [importingAntigravityModels, setImportingAntigravityModels] = useState(false);
   const [importingAntigravityCli, setImportingAntigravityCli] = useState(false);
+  const [importingClineCli, setImportingClineCli] = useState(false);
   const { copied, copy } = useCopyToClipboard();
 
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
@@ -801,6 +802,39 @@ export default function ProviderDetailPage() {
       alert(translate("Failed to import Antigravity CLI session") + ": " + error.message);
     } finally {
       setImportingAntigravityCli(false);
+    }
+  };
+  // Cline: import the session the Cline CLI (or VS Code extension) is already
+  // signed in with. The CLI stores a WorkOS access token plus a refresh token
+  // in ~/.cline/data/settings/providers.json, so the server can create a
+  // normal oauth connection that refreshes like any other Cline connection.
+  const handleImportClineCli = async () => {
+    if (importingClineCli) return;
+    setImportingClineCli(true);
+    try {
+      const res = await fetch("/api/oauth/cline/auto-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || translate("Failed to import Cline CLI session"));
+        return;
+      }
+      await fetchConnections();
+      const imported = data.imported || [];
+      const reused = imported.filter((i) => i.reused).length;
+      const created = imported.length - reused;
+      const parts = [];
+      if (created) parts.push(translate("Imported") + ` ${created} ` + translate("Cline CLI session"));
+      if (reused) parts.push(translate("Refreshed") + ` ${reused} ` + translate("existing Cline connection"));
+      alert(parts.join(" · ") || translate("Imported Cline CLI session"));
+    } catch (error) {
+      console.log("Error importing Cline CLI session:", error);
+      alert(translate("Failed to import Cline CLI session") + ": " + error.message);
+    } finally {
+      setImportingClineCli(false);
     }
   };
   // Fetch the live Cline /models catalog and add every model not yet present.
@@ -1804,6 +1838,18 @@ export default function ProviderDetailPage() {
                 </div>
               </div>
               <div className="flex gap-2">
+                {(providerId === "cline" || providerId === "clinepass") && (
+                  <Button
+                    size="sm"
+                    icon="download"
+                    variant="secondary"
+                    onClick={handleImportClineCli}
+                    disabled={importingClineCli}
+                    title={translate("Import the session the Cline CLI is already signed in with")}
+                  >
+                    {importingClineCli ? translate("Importing...") : translate("Import from CLI")}
+                  </Button>
+                )}
                 {hasDualAuthModes ? (
                   <>
                     <Button size="sm" icon="lock" variant="secondary" onClick={triggerOAuthConnection}>
@@ -1948,6 +1994,19 @@ export default function ProviderDetailPage() {
                       className="w-full sm:w-auto"
                     >
                       {importingAntigravityCli ? translate("Importing...") : translate("Import from CLI")}
+                    </Button>
+                  )}
+                  {(providerId === "cline" || providerId === "clinepass") && (
+                    <Button
+                      size="sm"
+                      icon="download"
+                      variant="secondary"
+                      onClick={handleImportClineCli}
+                      disabled={importingClineCli}
+                      title={translate("Import the session the Cline CLI is already signed in with")}
+                      className="w-full sm:w-auto"
+                    >
+                      {importingClineCli ? translate("Importing...") : translate("Import from CLI")}
                     </Button>
                   )}
                   {hasDualAuthModes ? (

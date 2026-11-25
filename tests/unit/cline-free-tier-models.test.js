@@ -1,14 +1,19 @@
 // Cline's free tier lives in the `cline-free/` namespace and is published only
-// by the recommended-models feed, not by /api/v1/models. These tests pin that
+// by the recommended-models feed, not by the cloud catalog. These tests pin that
 // resolveClineModels() merges the feed's `free[]` into its catalog so the free
 // models reach /v1/models and the dashboard picker.
+//
+// The endpoints mirror the Cline CLI: the cloud catalog is
+// /api/v1/ai/cline/models and the shortlist/free/subscription tiers come from
+// /api/v1/ai/cline/recommended-models. The legacy /api/v1/models endpoint is an
+// OpenAI-compatible shape that carries none of the tiered ids.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const MODELS_URL = "https://api.cline.bot/api/v1/models";
+const CATALOG_URL = "https://api.cline.bot/api/v1/ai/cline/models";
 const FEED_URL = "https://api.cline.bot/api/v1/ai/cline/recommended-models";
 
-const MODELS_RESPONSE = [
+const CATALOG_RESPONSE = [
   { id: "meta/muse-spark-1.3-contributor" },
   { id: "deepseek/deepseek-v4.1-flash" },
   { id: "stealth/space-bunny-alpha" },
@@ -34,7 +39,7 @@ function jsonResponse(obj) {
 
 beforeEach(() => {
   fetchMock = vi.fn(async (url) => {
-    if (String(url) === MODELS_URL) return jsonResponse(MODELS_RESPONSE);
+    if (String(url) === CATALOG_URL) return jsonResponse(CATALOG_RESPONSE);
     if (String(url) === FEED_URL) return jsonResponse(FEED_RESPONSE);
     throw new Error("unexpected fetch: " + url);
   });
@@ -44,7 +49,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("resolveClineModels free-tier merge", () => {
-  it("includes the cline-free/* models that /api/v1/models omits", async () => {
+  it("includes the cline-free/* models the catalog omits", async () => {
     const { resolveClineModels } = await import("../../open-sse/services/clinepassModels.js");
     const result = await resolveClineModels({ accessToken: "test-token" });
     const ids = result.models.map((m) => m.id);
@@ -54,7 +59,7 @@ describe("resolveClineModels free-tier merge", () => {
     expect(ids).toContain("cline-free/mimo-v2.6-flash");
   });
 
-  it("keeps every /api/v1/models entry (feed is additive)", async () => {
+  it("keeps every catalog entry (feed is additive)", async () => {
     const { resolveClineModels } = await import("../../open-sse/services/clinepassModels.js");
     const result = await resolveClineModels({ accessToken: "test-token" });
     const ids = result.models.map((m) => m.id);
@@ -76,14 +81,14 @@ describe("resolveClineModels free-tier merge", () => {
     expect(entry.name).toBe("Muse Spark 1.3 Contributor");
   });
 
-  it("survives a failing feed and still returns the /models catalog", async () => {
+  it("survives a failing feed and still returns the catalog", async () => {
     fetchMock.mockImplementation(async (url) => {
-      if (String(url) === MODELS_URL) return jsonResponse(MODELS_RESPONSE);
+      if (String(url) === CATALOG_URL) return jsonResponse(CATALOG_RESPONSE);
       return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
     });
     const { resolveClineModels } = await import("../../open-sse/services/clinepassModels.js");
     const result = await resolveClineModels({ accessToken: "test-token" });
-    expect(result.models.map((m) => m.id)).toEqual(MODELS_RESPONSE.map((m) => m.id));
+    expect(result.models.map((m) => m.id)).toEqual(CATALOG_RESPONSE.map((m) => m.id));
   });
 
   it("does not leak the cline-pass/ subscription tier into the cline list", async () => {

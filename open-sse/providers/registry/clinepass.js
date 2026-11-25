@@ -41,17 +41,21 @@ export default {
       ],
     },
   },
+  // Fallback catalog for when the live feed is unreachable. The live list comes
+  // from the recommended-models feed (`clinePass[]` + `free[]`) — see
+  // services/clinepassModels.js.
   models: [
-    { id: "cline-pass/glm-5.2", name: "GLM-5.2 (ClinePass)" },
-    { id: "cline-pass/kimi-k2.7-code", name: "Kimi K2.7 Code (ClinePass)" },
-    { id: "cline-pass/kimi-k2.6", name: "Kimi K2.6 (ClinePass)" },
+    { id: "cline-pass/deepseek-v4.1-flash-1017", name: "DeepSeek V4.1 Flash 1017 (ClinePass)" },
     { id: "cline-pass/deepseek-v4-pro", name: "DeepSeek V4 Pro (ClinePass)" },
-    { id: "cline-pass/deepseek-v4-flash", name: "DeepSeek V4 Flash (ClinePass)" },
-    { id: "cline-pass/mimo-v2.5", name: "MiMo-V2.5 (ClinePass)" },
-    { id: "cline-pass/mimo-v2.5-pro", name: "MiMo-V2.5-Pro (ClinePass)" },
-    { id: "cline-pass/minimax-m3", name: "MiniMax M3 (ClinePass)" },
-    { id: "cline-pass/qwen3.7-max", name: "Qwen3.7 Max (ClinePass)" },
-    { id: "cline-pass/qwen3.7-plus", name: "Qwen3.7 Plus (ClinePass)" },
+    { id: "cline-pass/glm-5.3", name: "GLM-5.3 (ClinePass)" },
+    { id: "cline-pass/glm-5.3-flash", name: "GLM-5.3 Flash (ClinePass)" },
+    { id: "cline-pass/kimi-k3", name: "Kimi K3 (ClinePass)" },
+    { id: "cline-pass/kimi-k3.1-pro", name: "Kimi K3.1 Pro (ClinePass)" },
+    { id: "cline-pass/muse-spark-1.3-contributor", name: "Muse Spark 1.3 Contributor (ClinePass)" },
+    { id: "cline-pass/qwen3.8-max", name: "Qwen3.8 Max (ClinePass)" },
+    { id: "cline-pass/minimax-m3.1-flash", name: "MiniMax M3.1 Flash (ClinePass)" },
+    { id: "cline-free/nemotron-3.5-super-vl", name: "Nemotron 3.5 Super VL (ClinePass Free)" },
+    { id: "nvidia/nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning (ClinePass Free)" },
   ],
   oauth: {
     appBaseUrl: "https://app.cline.bot",
