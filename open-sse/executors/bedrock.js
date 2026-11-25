@@ -70,7 +70,19 @@ export class BedrockExecutor extends BaseExecutor {
     // spread because a claude-format client may carry its own (e.g. "2023-06-01"), and letting
     // that win earns a ValidationException.
     if (!this.isClaudeWire) return rest;
-    return { ...rest, anthropic_version: BEDROCK.anthropicVersion };
+    const clientBeta = credentials?.rawHeaders?.["anthropic-beta"] || credentials?.rawHeaders?.["Anthropic-Beta"];
+    const out = { ...rest, anthropic_version: BEDROCK.anthropicVersion };
+    const betas = [];
+    if (clientBeta) {
+      betas.push(...clientBeta.split(",").map((s) => s.trim()).filter(Boolean));
+    }
+    if (body?.safeguards && !betas.includes("dangerous-tool-use-2026-09-03")) {
+      betas.push("dangerous-tool-use-2026-09-03");
+    }
+    if (betas.length > 0 && !out.anthropic_beta) {
+      out.anthropic_beta = [...new Set(betas)];
+    }
+    return out;
   }
 
   buildHeaders(credentials, stream = true) {

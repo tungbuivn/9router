@@ -80,7 +80,8 @@ export function createSSEStream(options = {}) {
         // hop of a pivot, and on the terminal null chunk the pivot drops it — so a
         // translator that defers closing events until flush needs to know which case
         // it is in. Absent/undefined means "unknown", i.e. do not defer.
-        targetFormat }
+        targetFormat,
+        hasSafeguards: Boolean(body?.safeguards) }
     : null;
 
   let totalContentLength = 0;

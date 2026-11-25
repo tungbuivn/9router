@@ -315,7 +315,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       }
 
       if (sourceFormat === FORMATS.CLAUDE) {
-        finalResp = openAICompletionToClaudeMessage(finalResp);
+        finalResp = openAICompletionToClaudeMessage(finalResp, body);
       }
 
       const finalClientResp = restoreToolNames(finalResp, toolNameMap);
@@ -432,7 +432,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     const finalBody = sourceFormat === FORMATS.OPENAI_RESPONSES
       ? chatCompletionToResponses(parsed, customToolNames)
       : sourceFormat === FORMATS.CLAUDE
-        ? openAICompletionToClaudeMessage(parsed)
+        ? openAICompletionToClaudeMessage(parsed, body)
         : parsed;
 
     const finalClientResp = restoreToolNames(finalBody, toolNameMap);

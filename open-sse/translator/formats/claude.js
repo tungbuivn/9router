@@ -498,14 +498,16 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     delete body.output_config;
   }
 
-  // Claude Code puts a `context_management` block (context-editing strategy) in
-  // every request; only Anthropic accepts it — gateways fronting other engines
-  // answer 400 "context_management: Extra inputs are not permitted". Same-format
-  // claude→claude requests skip body rebuilding in the translator, so the field
-  // rides through to every non-Anthropic provider on the Claude transport.
-  const isAnthropicServing = provider === "claude" || provider?.startsWith?.("anthropic-compatible-");
+  // Claude Code puts `context_management` and `safeguards` blocks in
+  // requests; only Anthropic accepts them — gateways fronting other engines
+  // answer 400 "context_management: Extra inputs are not permitted" or
+  // "safeguards: Extra inputs are not permitted". Same-format
+  // claude→claude requests skip body rebuilding in the translator, so the fields
+  // ride through to every non-Anthropic provider on the Claude transport.
+  const isAnthropicServing = provider === "claude" || provider === "anthropic" || provider === "bedrock" || provider?.startsWith?.("anthropic-compatible-");
   if (!isAnthropicServing) {
     delete body.context_management;
+    delete body.safeguards;
   }
 
   // Models whose API rejects thinking "disabled" and forced tool use with a 400

@@ -234,12 +234,12 @@ export class DefaultExecutor extends BaseExecutor {
     // a node fronting Kimi or GLM answers on its own ids and never matches, so
     // gateways that would choke on unknown beta flags are left untouched.
     const isClaudeModel = typeof model === "string" && /^claude-/.test(model);
-    const clientBeta = credentials?.rawHeaders?.["anthropic-beta"];
+    const clientBeta = credentials?.rawHeaders?.["anthropic-beta"] || credentials?.rawHeaders?.["Anthropic-Beta"];
     if (model && (this.provider === "claude"
       || (this.provider?.startsWith?.("anthropic-compatible-") && isClaudeModel))) {
       headers["Anthropic-Beta"] = mergeAnthropicBeta(selectAnthropicBeta(model, body), clientBeta);
-    } else if (this.provider === "anthropic" && clientBeta) {
-      headers["Anthropic-Beta"] = mergeAnthropicBeta(headers["Anthropic-Beta"], clientBeta);
+    } else if (this.provider === "anthropic") {
+      headers["Anthropic-Beta"] = mergeAnthropicBeta(headers["Anthropic-Beta"] || selectAnthropicBeta(model, body), clientBeta, body?.safeguards ? "dangerous-tool-use-2026-09-03" : null);
     }
 
     // Claude OAuth: align x-claude-code-session-id with metadata.user_id.session_id if missing

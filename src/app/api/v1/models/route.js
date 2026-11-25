@@ -523,7 +523,18 @@ export async function buildModelsList(kindFilter, options = {}) {
     }
   } catch {}
 
+  // A hidden provider is not offered in the dashboard grid, so it must not be
+  // auto-offered here either. `hidden` marks providers that are not wired up
+  // (e.g. mimo-free: the free MiMo channel is retired — its bootstrap endpoint
+  // answers 404). The dashboard toggle in providers/page.js filters on `hidden`
+  // too, so such a provider has no card and therefore no switch to turn it
+  // off — publishing it here would leave an unreachable model id in /v1/models.
+  //
+  // A provider with a real connection is unaffected: the loop below only fills
+  // in providers the user never connected, and a hidden provider the user
+  // explicitly connected keeps working (same as hidden OAuth providers).
   for (const [id, provider] of Object.entries(FREE_PROVIDERS || {})) {
+    if (provider?.hidden) continue;
     if (provider?.noAuth && !activeConnectionByProvider.has(id) && !disabledNoAuth.has(id)) {
       activeConnectionByProvider.set(id, {
         id: "noauth",
@@ -625,6 +636,9 @@ export async function buildModelsList(kindFilter, options = {}) {
     // DB unavailable -> return static models, filtered by per-model kind
     for (const [alias, providerModels] of Object.entries(PROVIDER_MODELS)) {
       const providerId = ALIAS_TO_PROVIDER_ID[alias] || alias;
+      // Hidden providers are not wired up — publishing their static rows would
+      // advertise model ids the upstream no longer serves.
+      if (AI_PROVIDERS[providerId]?.hidden) continue;
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
       for (const model of providerModels) {
         if (!kindFilter.includes(modelKind(model))) continue;

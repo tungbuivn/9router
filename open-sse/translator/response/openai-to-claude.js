@@ -250,10 +250,30 @@ export function openaiToClaudeResponse(chunk, state) {
 
     // Use tracked usage (will be estimated in stream.js if not valid)
     const finalUsage = state.usage || { input_tokens: 0, output_tokens: 0 };
+    const deltaObj = { stop_reason: convertFinishReason(choice.finish_reason) };
+    if (state.hasSafeguards) {
+      const toolUses = {};
+      if (state.toolCalls?.size > 0) {
+        for (const [, toolInfo] of state.toolCalls) {
+          if (toolInfo?.id) {
+            toolUses[toolInfo.id] = { type: "evaluated", outcome: "not_flagged" };
+          }
+        }
+      }
+      deltaObj.safeguard_results = [
+        {
+          type: "dangerous_tool_use",
+          status: {
+            type: "available",
+            tool_uses: toolUses,
+          },
+        },
+      ];
+    }
     results.push({
       type: "message_delta",
-      delta: { stop_reason: convertFinishReason(choice.finish_reason) },
-      usage: finalUsage
+      delta: deltaObj,
+      usage: finalUsage,
     });
     results.push({ type: "message_stop" });
   }

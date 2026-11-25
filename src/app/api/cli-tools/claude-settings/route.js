@@ -158,11 +158,9 @@ export async function POST(request) {
       }
     }
 
-    // Normalize ANTHROPIC_BASE_URL to ensure /v1 suffix
+    // Preserve ANTHROPIC_BASE_URL as entered by the user
     if (env.ANTHROPIC_BASE_URL) {
-      env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL.endsWith("/v1")
-        ? env.ANTHROPIC_BASE_URL
-        : `${env.ANTHROPIC_BASE_URL}/v1`;
+      env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL.trim();
     }
 
     // Keep an existing token (real key or earlier config); only add when absent — Reset clears it.
@@ -228,6 +226,11 @@ export async function POST(request) {
       delete newSettings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
     }
 
+    // CLAUDE_CODE_AUTO_MODE_SERVER
+    if (env.CLAUDE_CODE_AUTO_MODE_SERVER !== undefined) {
+      newSettings.env.CLAUDE_CODE_AUTO_MODE_SERVER = String(env.CLAUDE_CODE_AUTO_MODE_SERVER);
+    }
+
     // Write new settings
     await fs.writeFile(settingsPath, JSON.stringify(newSettings, null, 2));
 
@@ -263,6 +266,7 @@ const RESET_ENV_KEYS = [
   "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
   "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
   "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+  "CLAUDE_CODE_AUTO_MODE_SERVER",
 ];
 
 // DELETE - Reset settings (remove env fields)

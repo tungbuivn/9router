@@ -82,6 +82,7 @@ export function wantsThinkingSummaries(body) {
 export function selectAnthropicBeta(model = "", body = null) {
   const flags = ANTHROPIC_BETA_BASE.filter((flag) => flag !== ANTHROPIC_BETA_REDACT_THINKING || !wantsThinkingSummaries(body));
   if (/^claude-(opus|sonnet)/.test(model)) flags.push(...ANTHROPIC_BETA_HEAVY_AGENT);
+  if (body?.safeguards) flags.push("dangerous-tool-use-2026-09-03");
   return flags.join(",");
 }
 

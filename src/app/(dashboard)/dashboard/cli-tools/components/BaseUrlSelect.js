@@ -89,13 +89,13 @@ export default function BaseUrlSelect({
   // Sync the active config URL without replacing edits unless the config itself changes.
   useEffect(() => {
     if (!presetsLoaded || options.length === 0) return;
-    const normalizeUrl = (url) => (withV1 ? ensureV1(url) : stripSlash(url));
-    const current = normalizeUrl(currentUrl);
+    const clean = (u) => (u || "").replace(/\/+$/, "");
+    const current = clean(currentUrl);
     if (initializedRef.current && currentUrlRef.current === current) return;
     initializedRef.current = true;
     currentUrlRef.current = current;
     const matched = current
-      ? options.find((o) => o.value !== CUSTOM_VALUE && normalizeUrl(o.url) === current)
+      ? options.find((o) => o.value !== CUSTOM_VALUE && (clean(o.url) === current || clean(o.url).replace(/\/v1$/, "") === current.replace(/\/v1$/, "")))
       : null;
     if (matched) {
       setCustomInput("");
@@ -103,17 +103,17 @@ export default function BaseUrlSelect({
       setMode(matched.value);
       onChange(matched.url);
     } else if (current) {
-      setCustomInput(current);
-      customInputRef.current = current;
+      setCustomInput(currentUrl);
+      customInputRef.current = currentUrl;
       setMode(CUSTOM_VALUE);
-      onChange(current);
+      onChange(currentUrl);
     } else {
       const target = options.find((o) => o.value !== CUSTOM_VALUE);
       if (!target) return;
       setMode(target.value);
       onChange(target.url);
     }
-  }, [presetsLoaded, options, onChange, currentUrl, withV1]);
+  }, [presetsLoaded, options, onChange, currentUrl]);
 
   const handleSelect = (e) => {
     const next = e.target.value;

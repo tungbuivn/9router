@@ -263,13 +263,11 @@ export default function ClaudeToolCard({
   };
 
   const getEffectiveBaseUrl = () => {
-    const url = customBaseUrl || baseUrl;
-    return url.endsWith("/v1") ? url : `${url}/v1`;
+    return customBaseUrl || baseUrl;
   };
 
   const getDisplayUrl = () => {
-    const url = customBaseUrl || baseUrl;
-    return url.endsWith("/v1") ? url : `${url}/v1`;
+    return customBaseUrl || baseUrl;
   };
 
   const handleApplySettings = async () => {
@@ -413,7 +411,11 @@ export default function ClaudeToolCard({
     const keyToUse = (selectedApiKey && selectedApiKey.trim())
       ? selectedApiKey
       : (!cloudEnabled ? "sk_9router" : "<API_KEY_FROM_DASHBOARD>");
-    const env = { ANTHROPIC_BASE_URL: getEffectiveBaseUrl(), ANTHROPIC_AUTH_TOKEN: keyToUse };
+    const cleanBaseUrl = getEffectiveBaseUrl();
+    const env = {
+      ANTHROPIC_BASE_URL: cleanBaseUrl,
+      ANTHROPIC_AUTH_TOKEN: keyToUse,
+    };
     tool.defaultModels.forEach((model) => {
       const targetModel = modelMappings[model.alias];
       if (targetModel && model.envKey) env[model.envKey] = targetModel;
@@ -528,6 +530,7 @@ export default function ClaudeToolCard({
                     tailscaleEnabled={tailscaleEnabled}
                     tailscaleUrl={tailscaleUrl}
                     currentUrl={currentBaseUrl}
+                    withV1={false}
                   />
                 </div>
 
@@ -552,9 +555,12 @@ export default function ClaudeToolCard({
                 {/* Model Mappings */}
                 {tool.defaultModels.map((model) => {
                   const mappedValue = modelMappings[model.alias] || "";
-                  const cleanModel = mappedValue ? stripModelContextMarker(mappedValue).model : "";
+                  const cleanModel = mappedValue
+                    ? stripModelContextMarker(mappedValue).model
+                    : (model.defaultValue ? stripModelContextMarker(model.defaultValue).model : "");
                   const modelCaps = cleanModel ? getCaps(cleanModel) : null;
                   const ctxWindow = modelCaps?.contextWindow;
+                  const isCurrentContext = ctxWindow && String(maxContextTokens) === String(ctxWindow);
 
                   return (
                     <div key={model.alias} className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
@@ -599,13 +605,22 @@ export default function ClaudeToolCard({
                           Select
                         </button>
                         {ctxWindow ? (
-                          <span
-                            className="inline-flex items-center gap-1 rounded bg-surface/80 px-2 py-2 text-[11px] font-mono text-text-muted border border-border shrink-0 select-none sm:py-1.5"
-                            title={`${ctxWindow.toLocaleString()} tokens context window`}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              hasUserEditedMaxContext.current = true;
+                              setMaxContextTokens(String(ctxWindow));
+                            }}
+                            className={`inline-flex items-center gap-1 rounded border px-2.5 py-2 text-xs font-mono transition-colors shrink-0 cursor-pointer sm:py-1.5 whitespace-nowrap ${
+                              isCurrentContext
+                                ? "bg-primary/10 border-primary/60 text-primary font-semibold"
+                                : "bg-surface border-border text-text-muted hover:text-text-main hover:border-primary"
+                            }`}
+                            title={`Set Max Context to ${ctxWindow.toLocaleString()} tokens`}
                           >
-                            <span className="material-symbols-outlined text-[13px] text-primary">data_object</span>
+                            <span className={`material-symbols-outlined text-[13px] ${isCurrentContext ? "text-primary" : "text-primary/80"}`}>data_object</span>
                             ctx {fmtContext(ctxWindow)}
-                          </span>
+                          </button>
                         ) : null}
                       </div>
                     </div>
