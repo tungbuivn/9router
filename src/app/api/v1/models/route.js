@@ -8,7 +8,7 @@ import {
   isOpenAICompatibleProvider,
   isAcpProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getProviderNodes, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
+import { getProviderConnections, getProviderNodes, getCombos, getCustomModels, getModelAliases, getSettings } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { getKeyAccessContext, filterModelsListForKey } from "@/sse/services/keyAccess.js";
 import { withApiRequestLog } from "@/lib/withApiRequestLog.js";
@@ -513,8 +513,18 @@ export async function buildModelsList(kindFilter, options = {}) {
   };
 
   // Include no-auth free providers (e.g. opencode) so their models are exposed in /v1/models
+  // Skip providers that are explicitly disabled via providerStrategies[id].disabled
+  let disabledNoAuth = new Set();
+  try {
+    const settings = await getSettings();
+    const strats = settings?.providerStrategies || {};
+    for (const [id, cfg] of Object.entries(strats)) {
+      if (cfg?.disabled) disabledNoAuth.add(id);
+    }
+  } catch {}
+
   for (const [id, provider] of Object.entries(FREE_PROVIDERS || {})) {
-    if (provider?.noAuth && !activeConnectionByProvider.has(id)) {
+    if (provider?.noAuth && !activeConnectionByProvider.has(id) && !disabledNoAuth.has(id)) {
       activeConnectionByProvider.set(id, {
         id: "noauth",
         provider: id,

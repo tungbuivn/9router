@@ -1,4 +1,5 @@
 const http = require("http");
+const net = require("net");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -126,6 +127,35 @@ http.createServer = (...args) => {
 };
 
 if (require.main === module) {
+  // Bind loopback unless the caller explicitly asks otherwise. Next's standalone
+  // server.js derives its listen address from process.env.HOSTNAME and falls back
+  // to 0.0.0.0, so an unset value would silently expose the dashboard and the /v1
+  // gateway to the LAN.
+  //
+  // Precedence: --host flag > NINEROUTER_HOST (set by the CLI launcher) > HOSTNAME
+  // only when it is an actual bind address. An inherited shell HOSTNAME holds the
+  // machine name, which is not an address, so it must not select the interface —
+  // Docker's explicit HOSTNAME=0.0.0.0 is an IP literal and stays honoured.
+  const hostFromArgv = (() => {
+    const argv = process.argv.slice(2);
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === "--host" || argv[i] === "-H") return argv[i + 1];
+      if (argv[i].startsWith("--host=")) return argv[i].slice("--host=".length);
+    }
+    return null;
+  })();
+  const isBindAddress = (value) => {
+    const v = String(value || "").trim();
+    if (!v) return false;
+    return v === "localhost" || net.isIP(v) !== 0;
+  };
+  const bindHost =
+    hostFromArgv ||
+    process.env.NINEROUTER_HOST ||
+    (isBindAddress(process.env.HOSTNAME) ? process.env.HOSTNAME : null) ||
+    "127.0.0.1";
+  process.env.HOSTNAME = bindHost;
+
   const standalone = path.join(__dirname, "server.js");
   if (fs.existsSync(standalone)) {
     require(standalone);
@@ -133,7 +163,13 @@ if (require.main === module) {
     // Repo checkout has no standalone build next to us. `next start` builds its HTTP
     // server in-process, so the wrapper above still sanitizes every request.
     const nextBin = require.resolve("next/dist/bin/next");
-    process.argv = [process.argv[0], nextBin, "start", ...process.argv.slice(2)];
+    // Drop any host flag already consumed above so it is not applied twice.
+    const passthrough = process.argv.slice(2).filter((arg, i, argv) => {
+      if (arg === "--host" || arg === "-H") return false;
+      if (i > 0 && (argv[i - 1] === "--host" || argv[i - 1] === "-H")) return false;
+      return !arg.startsWith("--host=");
+    });
+    process.argv = [process.argv[0], nextBin, "start", ...passthrough, "-H", bindHost];
     require(nextBin);
   }
 }

@@ -102,6 +102,7 @@ const APIKEY_INITIAL_VISIBLE = 20;
 export default function ProvidersPage() {
   const [connections, setConnections] = useState([]);
   const [providerNodes, setProviderNodes] = useState([]);
+  const [providerStrategies, setProviderStrategies] = useState({});
   const [loading, setLoading] = useState(true);
   const [showAllApikey, setShowAllApikey] = useState(false);
   const [showAddCompatibleModal, setShowAddCompatibleModal] = useState(false);
@@ -156,15 +157,18 @@ export default function ProvidersPage() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [connectionsRes, nodesRes] = await Promise.all([
+        const [connectionsRes, nodesRes, settingsRes] = await Promise.all([
           fetch("/api/providers"),
           fetch("/api/provider-nodes"),
+          fetch("/api/settings"),
         ]);
         const connectionsData = await connectionsRes.json();
         const nodesData = await nodesRes.json();
+        const settingsData = settingsRes.ok ? await settingsRes.json() : {};
         if (connectionsRes.ok)
           setConnections(connectionsData.connections || []);
         if (nodesRes.ok) setProviderNodes(nodesData.nodes || []);
+        if (settingsRes.ok) setProviderStrategies(settingsData.providerStrategies || {});
       } catch (error) {
         console.log("Error fetching data:", error);
       } finally {
@@ -174,7 +178,7 @@ export default function ProvidersPage() {
     fetchData();
   }, []);
 
-  const getProviderStats = (providerId, authType) => {
+  const getProviderStats = (providerId, authType, isNoAuth = false) => {
     const authTypes = Array.isArray(authType) ? authType : [authType];
     const providerConnections = connections.filter(
       (c) => c.provider === providerId && authTypes.includes(c.authType),
@@ -204,8 +208,10 @@ export default function ProvidersPage() {
 
     const error = errorConns.length;
     const total = providerConnections.length;
-    const allDisabled =
-      total > 0 && providerConnections.every((c) => c.isActive === false);
+    const isNoAuthDisabled = isNoAuth && providerStrategies[providerId]?.disabled === true;
+    const allDisabled = isNoAuth
+      ? isNoAuthDisabled
+      : total > 0 && providerConnections.every((c) => c.isActive === false);
 
     const latestError = errorConns.sort(
       (a, b) => new Date(b.lastErrorAt || 0) - new Date(a.lastErrorAt || 0),
@@ -224,6 +230,36 @@ export default function ProvidersPage() {
   // Toggle all connections for a provider on/off. authType may be a single
   // string or an array (kiro counts oauth + api_key/apikey together).
   const handleToggleProvider = async (providerId, authType, newActive) => {
+    const isNoAuth = !!(FREE_PROVIDERS[providerId]?.noAuth || AI_PROVIDERS[providerId]?.noAuth);
+    if (isNoAuth) {
+      setProviderStrategies((prev) => {
+        const current = prev[providerId] || {};
+        const updated = { ...current };
+        if (!newActive) updated.disabled = true;
+        else delete updated.disabled;
+        return { ...prev, [providerId]: updated };
+      });
+      try {
+        const res = await fetch("/api/settings", { cache: "no-store" });
+        const data = res.ok ? await res.json() : {};
+        const current = data.providerStrategies || {};
+        const override = { ...(current[providerId] || {}) };
+        if (!newActive) override.disabled = true;
+        else delete override.disabled;
+        const updated = { ...current };
+        if (Object.keys(override).length === 0) delete updated[providerId];
+        else updated[providerId] = override;
+        await fetch("/api/settings", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ providerStrategies: updated }),
+        });
+      } catch (err) {
+        console.log("Error updating provider strategy:", err);
+      }
+      return;
+    }
+
     const authTypes = Array.isArray(authType) ? authType : [authType];
     const matches = (c) =>
       c.provider === providerId && authTypes.includes(c.authType);
@@ -594,7 +630,7 @@ export default function ProvidersPage() {
                 key={key}
                 providerId={key}
                 provider={info}
-                stats={getProviderStats(key, freeAuthTypes)}
+                stats={getProviderStats(key, freeAuthTypes, info.noAuth)}
                 authType="free"
                 onToggle={(active) =>
                   handleToggleProvider(key, freeAuthTypes, active)
@@ -609,7 +645,7 @@ export default function ProvidersPage() {
                 key={key}
                 providerId={key}
                 provider={info}
-                stats={getProviderStats(key, freeAuthTypes)}
+                stats={getProviderStats(key, freeAuthTypes, info.noAuth)}
                 authType={Array.isArray(freeAuthTypes) ? (freeAuthTypes[0] ?? "apikey") : freeAuthTypes}
                 onToggle={(active) => handleToggleProvider(key, freeAuthTypes, active)}
               />
@@ -808,7 +844,7 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {stats.total > 0 && (
+            {(stats.total > 0 || isNoAuth) && (
               <div
                 className="opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100"
                 onClick={(e) => {
@@ -858,6 +894,7 @@ function ApiKeyProviderCard({
   onToggle,
 }) {
   const { connected, error, errorCode, errorTime, allDisabled } = stats;
+  const isNoAuth = !!provider.noAuth;
   const isCompatible = providerId.startsWith(OPENAI_COMPATIBLE_PREFIX);
   const isAnthropicCompatible = providerId.startsWith(
     ANTHROPIC_COMPATIBLE_PREFIX,
@@ -955,7 +992,7 @@ function ApiKeyProviderCard({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {stats.total > 0 && (
+            {(stats.total > 0 || isNoAuth) && (
               <div
                 className="opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100"
                 onClick={(e) => {

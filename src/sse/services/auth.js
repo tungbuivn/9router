@@ -47,6 +47,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     if (FREE_PROVIDERS[providerId]?.noAuth) {
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
+      if (override.disabled) {
+        log.warn("AUTH", `Provider ${providerId} is disabled`);
+        return null;
+      }
       const strategy = override.rotateStrategy || "none";
       let pickedId = override.proxyPoolId || null;
       if (strategy !== "none") {

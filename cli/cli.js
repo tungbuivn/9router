@@ -117,7 +117,15 @@ const APP_NAME = pkg.name; // Use from package.json
 const INSTALL_CMD_LATEST = `npm i -g ${APP_NAME}@latest --prefer-online`;
 
 const DEFAULT_PORT = 20128;
-const DEFAULT_HOST = "0.0.0.0";
+// Loopback by default. The dashboard session and the /v1 gateway have their own
+// auth, but binding every interface still put them in reach of the LAN, so the
+// default is local-only. Opt back in with --host 0.0.0.0.
+const DEFAULT_HOST = "127.0.0.1";
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+function isLoopbackBind(value) {
+  return LOOPBACK_HOSTS.has(String(value || "").trim().toLowerCase());
+}
 
 // First non-internal IPv4 — the address remote peers actually reach when bound to 0.0.0.0.
 function getLanIp() {
@@ -131,7 +139,7 @@ function getLanIp() {
 
 // Local URL stays "localhost"; warn separately when bound to all interfaces (network-exposed).
 function getDisplayHost() {
-  return host === DEFAULT_HOST ? "localhost" : host;
+  return isLoopbackBind(host) ? "localhost" : host;
 }
 const MAX_PORT_ATTEMPTS = 10;
 // Upper bounds for waiting on killed processes / a released port. Both waits
@@ -648,10 +656,10 @@ function startServer(updatePromise) {
   const latestVersionPromise = Promise.resolve(updatePromise);
   const displayHost = getDisplayHost();
   const url = `http://${displayHost}:${port}/dashboard`;
-  // Surface real network exposure when bound to all interfaces (default 0.0.0.0).
-  if (host === DEFAULT_HOST) {
+  // Surface real network exposure when bound to all interfaces.
+  if (!isLoopbackBind(host)) {
     const lanIp = getLanIp();
-    if (lanIp) console.log(`\x1b[33m⚠ Network-exposed: reachable at http://${lanIp}:${port} (bound 0.0.0.0). Use --host 127.0.0.1 for local-only.\x1b[0m`);
+    if (lanIp) console.log(`\x1b[33m⚠ Network-exposed: reachable at http://${lanIp}:${port} (bound ${host}). Use --host 127.0.0.1 for local-only.\x1b[0m`);
   }
 
   let restartCount = 0;
@@ -671,7 +679,8 @@ function startServer(updatePromise) {
       env: {
         ...buildEnvWithRuntime(process.env),
         PORT: port.toString(),
-        HOSTNAME: host
+        HOSTNAME: host,
+        NINEROUTER_HOST: host
       }
     });
     if (!showLog && child.stderr) {

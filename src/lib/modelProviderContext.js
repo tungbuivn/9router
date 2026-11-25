@@ -175,10 +175,14 @@ export function findModelInProviderList(models, targetModelId) {
   const target = String(targetModelId).trim().toLowerCase();
   const targetBase = target.split(":")[0];
 
-  // 1. Exact match on id, name, slug, or display_name
+  // 1. Exact match on id, name, slug, or display_name, or in aliases
   let found = models.find((m) => {
     const id = (m?.id || m?.name || m?.slug || m?.model || m?.display_name || "").toLowerCase();
-    return id === target;
+    if (id === target) return true;
+    if (Array.isArray(m?.aliases)) {
+      return m.aliases.some((a) => String(a).toLowerCase() === target);
+    }
+    return false;
   });
   if (found) return found;
 
@@ -206,6 +210,12 @@ export function findModelInProviderList(models, targetModelId) {
   });
   if (found) return found;
 
+  // 5. Fallback for single-model local endpoints (llama-server, unsloth, etc.):
+  // If the provider has only 1 model currently running, adopt it as fallback
+  if (models.length === 1 && models[0]) {
+    return models[0];
+  }
+
   return null;
 }
 
@@ -221,6 +231,10 @@ export function extractModelContextInfo(modelObj) {
     modelObj.max_context_length ??
     modelObj.native_context_length ??
     modelObj.context_window ??
+    modelObj.max_model_len ??
+    modelObj.meta?.n_ctx ??
+    modelObj.meta?.context_length ??
+    modelObj.meta?.n_ctx_train ??
     modelObj.details?.context_length ??
     modelObj.max_tokens;
 

@@ -285,6 +285,49 @@ describe("dashboard guard local-only access", () => {
 
     expect(response).toBe(mocks.nextResponse);
   });
+
+  // The Antigravity CLI auto-import reads the host keyring, so it carries the
+  // same restrictions as the cursor/kiro/zed auto-import routes.
+  it("rejects the antigravity CLI auto-import from a non-loopback host", async () => {
+    const response = await proxy(request("/api/oauth/antigravity/auto-import", {
+      host: "router.example.com",
+    }));
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe("Local only: CLI token required");
+  });
+
+  it("rejects the antigravity CLI auto-import from a tunnel host even when requireLogin=false", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+
+    const response = await proxy(request("/api/oauth/antigravity/auto-import", {
+      host: "router.example.com",
+    }));
+
+    expect(response.status).toBe(403);
+  });
+
+  it("rejects the antigravity CLI auto-import when Origin is non-loopback (CSRF block)", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+
+    const response = await proxy(localRequest("/api/oauth/antigravity/auto-import", {
+      host: "localhost:20128",
+      origin: "http://evil.example.com",
+    }));
+
+    expect(response.status).toBe(403);
+  });
+
+  it("allows the antigravity CLI auto-import on loopback when requireLogin=false", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+
+    const response = await proxy(localRequest("/api/oauth/antigravity/auto-import", {
+      host: "localhost:20128",
+      origin: "http://localhost:20128",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
 });
 
 describe("dashboard guard helpers", () => {

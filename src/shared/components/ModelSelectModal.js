@@ -122,10 +122,14 @@ export default function ModelSelectModal({
     });
   }, [effectiveConnections, kindFilter]);
 
+  const [disabledNoAuthProviders, setDisabledNoAuthProviders] = useState([]);
+
   // Set of provider IDs that have connections configured, but ALL of them are deactivated (isActive === false)
   const deactivatedProviderIds = useMemo(() => {
-    return getDeactivatedProviderIds(effectiveConnections);
-  }, [effectiveConnections]);
+    const deactivated = getDeactivatedProviderIds(effectiveConnections);
+    for (const id of disabledNoAuthProviders) deactivated.add(id);
+    return deactivated;
+  }, [effectiveConnections, disabledNoAuthProviders]);
 
   const { getCaps } = useModelCaps();
   const [searchQuery, setSearchQuery] = useState("");
@@ -210,10 +214,22 @@ export default function ModelSelectModal({
 
   const fetchDisabledModels = async () => {
     try {
-      const res = await fetch("/api/models/disabled");
-      if (!res.ok) throw new Error(`Failed to fetch disabled models: ${res.status}`);
-      const data = await res.json();
-      setDisabledModels(data.disabled || {});
+      const [disRes, setRes] = await Promise.all([
+        fetch("/api/models/disabled"),
+        fetch("/api/settings", { cache: "no-store" }),
+      ]);
+      if (disRes.ok) {
+        const data = await disRes.json();
+        setDisabledModels(data.disabled || {});
+      }
+      if (setRes.ok) {
+        const sData = await setRes.json();
+        const strats = sData.providerStrategies || {};
+        const disabledIds = Object.entries(strats)
+          .filter(([, cfg]) => cfg?.disabled)
+          .map(([id]) => id);
+        setDisabledNoAuthProviders(disabledIds);
+      }
     } catch (error) {
       console.error("Error fetching disabled models:", error);
       setDisabledModels({});

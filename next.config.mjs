@@ -28,7 +28,10 @@ const nextConfig = {
   // undici must stay external too: webpack's vendored copy drops the per-request
   // `dispatcher` connect options (ecdhCurve) — the built server then RSTs on
   // DPI-shaped networks while the dev server (real undici) passes.
-  serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite", "open", "@aws-sdk/credential-providers", "wreq-js", "undici"],
+  // dbus-next must stay external: it lazily requires the optional `x11` package
+  // to read the session bus address from a window selection, which does not
+  // exist on a server and breaks the bundle ("Can't resolve 'x11'").
+  serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite", "open", "@aws-sdk/credential-providers", "wreq-js", "undici", "dbus-next"],
   turbopack: {
     root: tracingRoot
   },

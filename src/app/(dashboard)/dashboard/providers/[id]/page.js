@@ -100,6 +100,8 @@ export default function ProviderDetailPage() {
   const stopOneByOneRef = useRef(false);
   const [importingQoderModels, setImportingQoderModels] = useState(false);
   const [importingClineModels, setImportingClineModels] = useState(false);
+  const [importingAntigravityModels, setImportingAntigravityModels] = useState(false);
+  const [importingAntigravityCli, setImportingAntigravityCli] = useState(false);
   const { copied, copy } = useCopyToClipboard();
 
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
@@ -720,6 +722,87 @@ export default function ProviderDetailPage() {
       setImportingQoderModels(false);
     }
   };
+  // Antigravity: refresh the live per-account catalog and persist anything the
+  // static registry doesn't carry yet. The catalog itself is already rendered
+  // from liveModels (LIVE_MODEL_CATALOG_PROVIDERS); importing keeps those ids
+  // selectable outside this page (combos, model pickers) instead of only here.
+  const handleFetchAntigravityModels = async () => {
+    if (importingAntigravityModels) return;
+    const activeConnection = connections.find((conn) => conn.isActive !== false);
+    if (!activeConnection) {
+      alert(translate("Please add an active Antigravity connection first"));
+      return;
+    }
+    setImportingAntigravityModels(true);
+    setLiveModelsError(null);
+    try {
+      const res = await fetch(`/api/providers/${activeConnection.id}/models`, { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) {
+        setLiveModelsError(data.error || translate("Failed to fetch models"));
+        return;
+      }
+      const fetched = data.models || [];
+      if (fetched.length === 0) {
+        setLiveModelsError(data.warning || translate("No models returned"));
+        return;
+      }
+      setLiveModels(fetched);
+
+      // Persist only ids the registry doesn't define and that have no alias yet.
+      // Live-only rows (e.g. gemini-4-hydrogen-sonar) are otherwise reachable
+      // only while this page holds them in state.
+      const knownIds = new Set(getModelsByProviderId(providerId).map((m) => m.id));
+      let importedCount = 0;
+      for (const model of fetched) {
+        const modelId = model.id || model.name;
+        if (!modelId || knownIds.has(modelId)) continue;
+        const already = customModels.some(
+          (entry) => entry.providerAlias === providerStorageAlias && entry.id === modelId && (entry.kind || entry.type || "llm") === "llm"
+        ) || Object.values(modelAliases).includes(`${providerStorageAlias}/${modelId}`);
+        if (already) continue;
+        await handleAddCustomModel(modelId, "llm", providerStorageAlias, undefined, undefined, { silent: true, skipRefresh: true });
+        importedCount += 1;
+      }
+      if (importedCount > 0) await fetchCustomModels();
+      alert(
+        importedCount > 0
+          ? translate("Successfully added") + ` ${importedCount} ` + translate("models") + ` (${fetched.length} ${translate("discovered")})`
+          : translate("All models already exist, no new models added") + ` (${fetched.length} ${translate("discovered")})`
+      );
+    } catch (error) {
+      console.log("Error fetching Antigravity models:", error);
+      setLiveModelsError(translate("Error fetching models") + ": " + error.message);
+    } finally {
+      setImportingAntigravityModels(false);
+    }
+  };
+  // Antigravity: import the session the Antigravity CLI already signed in with.
+  // The CLI's refresh token is issued to this provider's own OAuth client, so
+  // the server can exchange it directly and store a normal oauth connection.
+  const handleImportAntigravityCli = async () => {
+    if (importingAntigravityCli) return;
+    setImportingAntigravityCli(true);
+    try {
+      const res = await fetch("/api/oauth/antigravity/auto-import", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || translate("Failed to import Antigravity CLI session"));
+        return;
+      }
+      await fetchConnections();
+      alert(
+        data.reused
+          ? translate("Refreshed the existing Antigravity connection from the CLI session")
+          : translate("Imported Antigravity CLI session") + (data.connection?.email ? ` (${data.connection.email})` : "")
+      );
+    } catch (error) {
+      console.log("Error importing Antigravity CLI session:", error);
+      alert(translate("Failed to import Antigravity CLI session") + ": " + error.message);
+    } finally {
+      setImportingAntigravityCli(false);
+    }
+  };
   // Fetch the live Cline /models catalog and add every model not yet present.
   // Cline and ClinePass share the same catalog endpoint (api.cline.bot/api/v1/models).
   const handleImportClineModels = async () => {
@@ -1337,6 +1420,21 @@ export default function ProviderDetailPage() {
           Add Model
         </button>
 
+        {/* Antigravity live catalog refresh — the per-account list is fetched on
+            mount; this makes the fetch explicit and persists registry-unknown ids. */}
+        {providerId === "antigravity" && connections.some((conn) => conn.isActive !== false) && (
+          <button
+            onClick={handleFetchAntigravityModels}
+            disabled={importingAntigravityModels}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span className="material-symbols-outlined text-sm" style={importingAntigravityModels ? { animation: "spin 1s linear infinite" } : undefined}>
+              {importingAntigravityModels ? "progress_activity" : "download"}
+            </span>
+            {importingAntigravityModels ? translate("Fetching...") : translate("Fetch Antigravity Models")}
+          </button>
+        )}
+
         {/* Import Qoder models button — only show for qoder/qoder-cn provider */}
         {(providerId === "qoder" || providerId === "qoder-cn") && connections.some((conn) => conn.isActive !== false) && (
           <button
@@ -1505,7 +1603,7 @@ export default function ProviderDetailPage() {
               )}
             </div>
             <p className="text-text-muted">
-              {connections.length} connection{connections.length === 1 ? "" : "s"}
+              {isFreeNoAuth ? "Ready (no auth required)" : `${connections.length} connection${connections.length === 1 ? "" : "s"}`}
             </p>
           </div>
         </div>
@@ -1738,6 +1836,18 @@ export default function ProviderDetailPage() {
                         {translate("Bulk Add")}
                       </Button>
                     )}
+                    {providerId === "antigravity" && (
+                      <Button
+                        size="sm"
+                        icon="download"
+                        variant="secondary"
+                        onClick={handleImportAntigravityCli}
+                        disabled={importingAntigravityCli}
+                        title={translate("Import the session the Antigravity CLI is already signed in with")}
+                      >
+                        {importingAntigravityCli ? translate("Importing...") : translate("Import from CLI")}
+                      </Button>
+                    )}
                     {!isAcp && (
                       <Button
                         size="sm"
@@ -1825,6 +1935,19 @@ export default function ProviderDetailPage() {
                       className="w-full sm:w-auto"
                     >
                       {translate("Bulk Add")}
+                    </Button>
+                  )}
+                  {providerId === "antigravity" && (
+                    <Button
+                      size="sm"
+                      icon="download"
+                      variant="secondary"
+                      onClick={handleImportAntigravityCli}
+                      disabled={importingAntigravityCli}
+                      title={translate("Import the session the Antigravity CLI is already signed in with")}
+                      className="w-full sm:w-auto"
+                    >
+                      {importingAntigravityCli ? translate("Importing...") : translate("Import from CLI")}
                     </Button>
                   )}
                   {hasDualAuthModes ? (

@@ -99,6 +99,7 @@ export function buildModelGroups({
   disabledModels = {},
   liveModels = {},
   providers = ALL_PROVIDERS,
+  disabledNoAuthProviders = [],
 } = {}) {
   const filteredActiveProviders = asArray(connections);
   const effectiveConnections = asArray(allConnections ?? connections);
@@ -107,9 +108,11 @@ export function buildModelGroups({
   const modelAliasesSafe = modelAliases || {};
   const disabledModelsSafe = disabledModels || {};
   const allProviders = providers || ALL_PROVIDERS;
+  const disabledNoAuthSet = new Set(asArray(disabledNoAuthProviders));
   // Paused providers (every connection of theirs is inactive) drop out; providers
   // with no connection row at all stay, e.g. keyless local endpoints.
   const deactivatedProviderIds = getDeactivatedProviderIds(effectiveConnections);
+  for (const id of disabledNoAuthSet) deactivatedProviderIds.add(id);
   const live = liveModels || {};
 
   const groups = {};

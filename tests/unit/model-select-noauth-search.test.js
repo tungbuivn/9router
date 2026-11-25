@@ -50,4 +50,13 @@ describe("no-auth search providers in model selection (#3269)", () => {
     expect(groups.tortoise).toBeUndefined();
     expect(groups["edge-tts"]).toBeDefined();
   });
+
+  it("drops a no-auth provider when it is in disabledNoAuthProviders", () => {
+    const groups = buildModelGroups({
+      kindFilter: "webSearch",
+      connections: [],
+      disabledNoAuthProviders: ["searxng"],
+    });
+    expect(groups.searxng).toBeUndefined();
+  });
 });

@@ -47,6 +47,11 @@ const withModelCapabilities = (provider, models) => {
       model.max_context_length ??
       model.native_context_length ??
       model.context_window ??
+      model.max_model_len ??
+      model.meta?.n_ctx ??
+      model.meta?.context_length ??
+      model.meta?.n_ctx_train ??
+      model.details?.context_length ??
       model.max_tokens ??
       caps.contextWindow;
 
