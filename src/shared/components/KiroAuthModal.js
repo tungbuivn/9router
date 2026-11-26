@@ -21,6 +21,8 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
   const [autoDetecting, setAutoDetecting] = useState(false);
   const [autoDetected, setAutoDetected] = useState(false);
   const [idcCredentials, setIdcCredentials] = useState(null);
+  const [cliImportStage, setCliImportStage] = useState("idle"); // idle | "w2-hint"
+  const [cliImportWarning, setCliImportWarning] = useState(null);
 
   // Auto-detect token when import method is selected
   useEffect(() => {
@@ -131,6 +133,41 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
       onMethodSelect("import-cli-proxy");
     } catch (err) {
       setError(err.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleImportFromCli = async (source = "auto") => {
+    setImporting(true);
+    setError(null);
+    setCliImportWarning(null);
+
+    try {
+      const res = await fetch("/api/oauth/kiro/import-cli", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Kiro CLI import failed");
+      }
+
+      if (data.warning) {
+        // The connection was created, but it carries a caveat the user has to
+        // read — keep the modal open until it is acknowledged.
+        setCliImportWarning(data.warning);
+        return;
+      }
+
+      onMethodSelect("import-cli");
+    } catch (err) {
+      setError(err.message);
+      // Nothing local was found — offer the proxy capture as the next step.
+      if (source === "auto") setCliImportStage("w2-hint");
     } finally {
       setImporting(false);
     }
@@ -283,6 +320,23 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
                   <h3 className="font-semibold mb-1">Import Token</h3>
                   <p className="text-sm text-text-muted">
                     Paste refresh token from Kiro IDE.
+                  </p>
+                </div>
+              </div>
+            </button>
+
+            {/* Import from Kiro CLI */}
+            <button
+              onClick={() => setSelectedMethod("import-cli")}
+              className="w-full p-4 text-left border border-border rounded-lg hover:bg-sidebar transition-colors"
+            >
+              <div className="flex items-start gap-3">
+                <span className="material-symbols-outlined text-primary mt-0.5">terminal</span>
+                <div className="flex-1">
+                  <h3 className="font-semibold mb-1">Import from Kiro CLI</h3>
+                  <p className="text-sm text-text-muted">
+                    Reuse the session of a locally installed <code>kiro-cli</code> (or capture it
+                    through the w2 proxy).
                   </p>
                 </div>
               </div>
@@ -538,6 +592,92 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
                     Back
                   </Button>
                 </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Import from Kiro CLI */}
+        {selectedMethod === "import-cli" && (
+          <div className="space-y-4">
+            <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg border border-blue-200 dark:border-blue-800">
+              <div className="flex gap-2">
+                <span className="material-symbols-outlined text-blue-600 dark:text-blue-400">info</span>
+                <p className="text-sm text-blue-800 dark:text-blue-200">
+                  Reads the session stored by the local <code>kiro-cli</code> (its data file, the OS
+                  keyring, or <code>~/.kiro</code>). If nothing is found, the Kiro session can be
+                  captured from a Whistle (w2) proxy instead.
+                </p>
+              </div>
+            </div>
+
+            {cliImportStage === "w2-hint" && (
+              <div className="bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg border border-amber-200 dark:border-amber-800">
+                <div className="flex gap-2">
+                  <span className="material-symbols-outlined text-amber-600 dark:text-amber-400">info</span>
+                  <div className="text-sm text-amber-800 dark:text-amber-200">
+                    <p className="font-medium mb-1">Capture from the w2 proxy</p>
+                    <p className="mb-2">
+                      Run the Kiro CLI through the local Whistle proxy (default 127.0.0.1:8899),
+                      then capture the credentials from its traffic:
+                    </p>
+                    <code className="block font-mono text-xs bg-amber-100 dark:bg-amber-900/40 p-2 rounded">
+                      HTTPS_PROXY=http://127.0.0.1:8899 HTTP_PROXY=http://127.0.0.1:8899 kiro-cli chat
+                    </code>
+                    <p className="mt-2">
+                      Whistle must be able to decrypt the traffic — install its root CA in the
+                      system trust store.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {cliImportWarning && (
+              <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-lg border border-green-200 dark:border-green-800">
+                <div className="flex gap-2">
+                  <span className="material-symbols-outlined text-green-600 dark:text-green-400">check_circle</span>
+                  <p className="text-sm text-green-800 dark:text-green-200">
+                    Kiro session imported. {cliImportWarning}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="bg-red-50 dark:bg-red-900/20 p-3 rounded-lg border border-red-200 dark:border-red-800">
+                <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+              </div>
+            )}
+
+            {cliImportWarning ? (
+              <div className="flex gap-2">
+                <Button onClick={() => onMethodSelect("import-cli")} fullWidth>
+                  Done
+                </Button>
+                <Button onClick={handleBack} variant="ghost" fullWidth>
+                  Back
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <Button onClick={() => handleImportFromCli("auto")} fullWidth disabled={importing}>
+                    {importing ? "Importing..." : "Import from Kiro CLI"}
+                  </Button>
+                  <Button onClick={handleBack} variant="ghost" fullWidth>
+                    Back
+                  </Button>
+                </div>
+
+                <Button
+                  onClick={() => handleImportFromCli("w2")}
+                  fullWidth
+                  variant="ghost"
+                  disabled={importing}
+                >
+                  {importing ? "Capturing..." : "Capture from w2 proxy (127.0.0.1:8899)"}
+                </Button>
               </>
             )}
           </div>
