@@ -65,7 +65,12 @@ const CLAUDE_MODELS = [
   { flag: "sonnet", envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL" },
   { flag: "haiku", envKey: "ANTHROPIC_DEFAULT_HAIKU_MODEL" },
 ];
-const CLAUDE_RESET_KEYS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", ...CLAUDE_MODELS.map((m) => m.envKey)];
+const CLAUDE_RESET_KEYS = [
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_AUTH_TOKEN",
+  ...CLAUDE_MODELS.map((m) => m.envKey),
+  "CLAUDE_CODE_AUTO_MODE_SERVER",
+];
 const claudePath = () => path.join(home(), ".claude", "settings.json");
 
 const claude = {
@@ -77,6 +82,9 @@ const claude = {
     const cur = readJson(file) || {};
     cur.hasCompletedOnboarding = true;
     cur.env = { ...(cur.env || {}), ANTHROPIC_BASE_URL: v1(baseUrl), ANTHROPIC_AUTH_TOKEN: apiKey };
+    // Claude Code's auto-mode server runs its own local listener, which would
+    // bypass 9router — keep it off, same as the dashboard's Apply button.
+    cur.env.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
     // A tier with no model (null) is removed so Claude Code uses its own default
     // instead of a stale value from an earlier run.
     for (const m of CLAUDE_MODELS) {

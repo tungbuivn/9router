@@ -1,3 +1,11 @@
+# Unreleased
+
+## Features
+- **Kiro**: import the session of a locally installed `kiro-cli` — the CLI's own data file (`~/.local/share/kiro-cli/data.sqlite3`, table `auth_kv`), the OS keyring or `~/.kiro` are read first, and when nothing is found the credentials are captured from a Whistle (w2) proxy on 127.0.0.1:8899 (bearer token from the Kiro runtime calls, refresh token from the captured OIDC/auth-service token request).
+
+## Fixes
+- **Claude Code**: the CLI Tools → Claude "Apply" button now writes `CLAUDE_CODE_AUTO_MODE_SERVER=0` to `~/.claude/settings.json`, so Claude Code's own auto-mode listener stays off and traffic goes to 9router only. The key is written on every Apply (a stale `1` can no longer survive the button), and `9router connect --tools claude` writes the same value. Applying to a hand-edited `settings.json` with trailing commas no longer fails with a 500 — the JSONC that Claude Code itself writes is now parsed on the Apply and Reset paths, not just on read.
+
 # v0.5.123 (2026-11-22)
 
 ## Features

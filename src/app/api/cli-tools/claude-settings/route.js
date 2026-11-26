@@ -26,10 +26,17 @@ const getClaudeSettingsPath = () => {
 // Claude Code CLI reads mcpServers from ~/.claude.json (NOT settings.json).
 const getClaudeJsonPath = () => path.join(os.homedir(), ".claude.json");
 
+// settings.json is JSONC in practice: Claude Code and users hand-edit it and
+// leave trailing commas. Every read must tolerate them — a plain JSON.parse
+// turns "Apply" into a 500 and the dashboard silently keeps the old config.
+const stripTrailingCommas = (text) => text.replace(/,(\s*[}\]])/g, "$1");
+
+const parseSettingsJson = (text) => JSON.parse(stripTrailingCommas(text));
+
 const readClaudeJson = async () => {
   try {
     const content = await fs.readFile(getClaudeJsonPath(), "utf-8");
-    return JSON.parse(content.replace(/,(\s*[}\]])/g, "$1"));
+    return parseSettingsJson(content);
   } catch {
     return null;
   }
@@ -39,7 +46,7 @@ const writeClaudeJsonMcp = async (mcpServers) => {
   const filePath = getClaudeJsonPath();
   let data = {};
   try {
-    data = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    data = parseSettingsJson(await fs.readFile(filePath, "utf-8"));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -80,8 +87,7 @@ const readSettings = async () => {
     const content = await fs.readFile(settingsPath, "utf-8");
     // Tolerate JSONC (trailing commas) and treat unparseable files as "no config"
     // rather than throwing a 500 that the UI misreads as "tool not installed".
-    const stripped = content.replace(/,(\s*[}\]])/g, "$1");
-    return JSON.parse(stripped);
+    return parseSettingsJson(content);
   } catch (error) {
     return null;
   }
@@ -151,7 +157,7 @@ export async function POST(request) {
     let currentSettings = {};
     try {
       const content = await fs.readFile(settingsPath, "utf-8");
-      currentSettings = JSON.parse(content);
+      currentSettings = parseSettingsJson(content);
     } catch (error) {
       if (error.code !== "ENOENT") {
         throw error;
@@ -226,10 +232,13 @@ export async function POST(request) {
       delete newSettings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
     }
 
-    // CLAUDE_CODE_AUTO_MODE_SERVER
-    if (env.CLAUDE_CODE_AUTO_MODE_SERVER !== undefined) {
-      newSettings.env.CLAUDE_CODE_AUTO_MODE_SERVER = String(env.CLAUDE_CODE_AUTO_MODE_SERVER);
-    }
+    // CLAUDE_CODE_AUTO_MODE_SERVER — Claude Code's auto-mode server runs its own
+    // local listener, which would bypass 9router. Apply always disables it, so
+    // a stale "1" from an earlier config cannot survive the button. An explicit
+    // value from the payload still wins (the dashboard sends "0").
+    newSettings.env.CLAUDE_CODE_AUTO_MODE_SERVER = String(
+      env.CLAUDE_CODE_AUTO_MODE_SERVER ?? "0"
+    );
 
     // Write new settings
     await fs.writeFile(settingsPath, JSON.stringify(newSettings, null, 2));
@@ -278,7 +287,7 @@ export async function DELETE() {
     let currentSettings = {};
     try {
       const content = await fs.readFile(settingsPath, "utf-8");
-      currentSettings = JSON.parse(content);
+      currentSettings = parseSettingsJson(content);
     } catch (error) {
       if (error.code === "ENOENT") {
         return NextResponse.json({

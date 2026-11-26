@@ -310,6 +310,10 @@ export default function ClaudeToolCard({
         env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
       }
 
+      // Claude Code's auto-mode server runs its own local listener; disable it
+      // so the CLI talks to 9Router only.
+      env.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
+
       const res = await fetch("/api/cli-tools/claude-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -342,6 +346,7 @@ export default function ClaudeToolCard({
               CLAUDE_CODE_AUTO_COMPACT_WINDOW: compactMode === "fixed" ? String(autoCompactWindow) : undefined,
               CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: disableUnknownModelEnforcement ? "1" : undefined,
               CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: enableGatewayDiscovery ? "1" : undefined,
+              CLAUDE_CODE_AUTO_MODE_SERVER: "0",
             },
           },
           exaMcpEnabled,
@@ -434,6 +439,8 @@ export default function ClaudeToolCard({
     if (enableGatewayDiscovery) {
       env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
     }
+    // Same env the Apply button writes — keep the copy/paste snippet in sync.
+    env.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
 
     return [
       {

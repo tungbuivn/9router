@@ -106,6 +106,17 @@ describe("connect tool writers", () => {
     expect(readJson(f)).toEqual({ theme: "dark", hasCompletedOnboarding: true, env: { KEEP: "1" } });
   });
 
+  it("claude disables Claude Code's auto-mode server, like the dashboard Apply does", async () => {
+    const f = path.join(home, ".claude", "settings.json");
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    // A stale "1" from an earlier config must not survive.
+    fs.writeFileSync(f, JSON.stringify({ env: { CLAUDE_CODE_AUTO_MODE_SERVER: "1" } }));
+    await tool("claude").apply(CTX);
+    expect(readJson(f).env.CLAUDE_CODE_AUTO_MODE_SERVER).toBe("0");
+    await tool("claude").reset();
+    expect(readJson(f).env?.CLAUDE_CODE_AUTO_MODE_SERVER).toBeUndefined();
+  });
+
   it("codex keeps other TOML tables and drops empty ones on reset", async () => {
     const f = path.join(home, ".codex", "config.toml");
     fs.mkdirSync(path.dirname(f), { recursive: true });
