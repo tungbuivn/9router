@@ -241,6 +241,14 @@ export async function GET() {
         }
       }
 
+      // Limits follow the FIRST seat (the primary model), not the aggregate.
+      // The aggregate above is the conservative min/max across members, which
+      // reorders the published window every time a fallback is appended — a
+      // combo published as 1M silently became 128k after adding a small model
+      // behind it, so clients compacted for a window the primary never had.
+      // The first seat is what actually serves a healthy request, so it owns
+      // the declared limits. The aggregate stays as the fallback for a seat
+      // that resolves to nothing.
       const firstSeat = (combo.models || [])[0];
       let firstSeatCaps = null;
       if (typeof firstSeat === "string") {

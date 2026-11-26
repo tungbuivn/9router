@@ -671,13 +671,20 @@ export default function CombosPage() {
 
 const fmtK = formatContextLabel;
 
+// Resolve one seat's capabilities. This mirrors useModelCaps.resolveCaps but keeps
+// the nested-combo and capability-table fallbacks in one place: without them a bare
+// nested combo name would read as a literal model id and fall through to the generic
+// pattern tables, under-reporting the window the combo actually publishes.
 function resolveModelCaps(modelStr, comboByName = {}, getCaps = null) {
   if (!modelStr) return null;
+  // A nested combo name is not a real model id — aggregate its members instead.
   if (comboByName[modelStr]) {
     return aggregateComboCapabilities(comboByName[modelStr], comboByName, getCaps);
   }
   const fromHook = getCaps?.(modelStr);
   if (fromHook?.contextWindow) return fromHook;
+  // The seat prefix is a UI alias (ocg, cmc, …) while the capability tables are
+  // keyed by provider id, so map it before the lookup.
   const slash = modelStr.indexOf("/");
   const alias = slash !== -1 ? modelStr.slice(0, slash) : null;
   const bare = slash !== -1 ? modelStr.slice(slash + 1) : modelStr;
@@ -720,9 +727,13 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
   // generic patterns and under-report the limits. getCaps carries the server's
   // answer for /api/models.
   const comboCaps = aggregateComboCapabilities(combo.models, comboByName, getCaps);
+  // Declared limits follow the FIRST model (the primary one that serves a healthy
+  // request), matching /api/models and /v1/models. aggregateComboCapabilities is
+  // deliberately still used for the capability badges and as the fallback: its
+  // min/max rule made the badge shrink to the smallest fallback even though the
+  // primary model was untouched.
   const firstModel = combo.models?.[0];
   const firstCaps = firstModel ? resolveModelCaps(firstModel, comboByName, getCaps) : null;
-  // Combo contextWindow and maxOutput are taken from the first item (primary model)
   const contextWindow = firstCaps?.contextWindow ?? comboCaps?.contextWindow;
   const maxOutput = firstCaps?.maxOutput ?? comboCaps?.maxOutput;
 

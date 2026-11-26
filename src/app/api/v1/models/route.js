@@ -621,11 +621,18 @@ export async function buildModelsList(kindFilter, options = {}) {
     } else {
       const comboCaps = aggregateComboCapabilities(combo.models, comboByName, resolveSeatCaps);
       if (comboCaps) entry.capabilities = comboCaps;
-      // Any seat can serve the request, so the only window a combo can promise is
-      // its smallest. Combo entries were the only models on this endpoint that
-      // published no limits at all, which leaves a client to guess from the name —
-      // and it guesses high (see the snake_case note on the per-provider path).
+      // Any seat can serve the request, so the aggregate rule would be the
+      // smallest window across members. Combo entries were the only models on
+      // this endpoint that published no limits at all, which leaves a client to
+      // guess from the name — and it guesses high (see the snake_case note on
+      // the per-provider path).
       const { contextWindow, maxOutput } = comboSeatLimits(combo, combosByName, new Set(), resolveSeatCaps);
+      // Declared limits come from the FIRST seat (primary model), matching
+      // /api/models and the dashboard badge. The aggregate above is the
+      // conservative min across members; using it made a 1M combo publish 128k
+      // the moment a smaller fallback was appended, so clients compacted early
+      // for a window the primary never had. Fall back to the aggregate only
+      // when the first seat resolves to nothing.
       const firstSeat = (combo.models || [])[0];
       const firstCaps = firstSeat ? resolveSeatCaps(firstSeat) || getCapabilitiesForModel(null, firstSeat) : null;
       const finalContext = firstCaps?.contextWindow ?? contextWindow;

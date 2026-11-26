@@ -1,5 +1,15 @@
 /**
- * Helpers for auto-generating combos grouping models by their context window.
+ * Helpers for auto-generating combos grouped by context window.
+ *
+ * Providers publish a window in tokens, but the same real limit arrives under
+ * several numbers: 1M shows up as 1_000_000 (most vendors) and 1_048_576
+ * (Gemini, Kimi); 256k as 256_000 and 262_144; 64k as 64_000 and 65_536. A naive
+ * equality check therefore puts two identical-window models in separate combos,
+ * so everything is bucketed through getContextGroupMeta() first and the bucket
+ * carries the canonical label used for the combo name.
+ *
+ * The bucket drives the combo NAME only. The actual ctx/max published for a
+ * combo comes from its first model (see ComboCard), never from the bucket.
  */
 
 // Format token count into standard label ("1M", "256k", "128k", "64k")
