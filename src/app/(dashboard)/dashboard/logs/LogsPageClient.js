@@ -18,6 +18,7 @@ const DETAIL_TABS = [
   { id: "beforeModify", label: "2. Before Modify", icon: "edit_note" },
   { id: "afterModify", label: "3. After Modify", icon: "auto_fix_high" },
   { id: "response", label: "4. Response", icon: "output" },
+  { id: "fallback", label: "Fallback & Retries", icon: "alt_route" },
   { id: "w2Capture", label: "5. Upstream Proxy", icon: "hub" },
   { id: "raw", label: "Raw JSON", icon: "data_object" },
 ];
@@ -772,11 +773,208 @@ export default function LogsPageClient() {
           )}
 
           {Array.isArray(selectedLog.attempts) && selectedLog.attempts.length > 0 && (
-            <JsonBlock
-              title={`Previous Fallback Attempts (${selectedLog.attempts.length})`}
-              data={selectedLog.attempts}
-              defaultExpanded={false}
-            />
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[18px] text-amber-500">alt_route</span>
+                  <span className="text-xs font-semibold text-text-main">
+                    Fallback History ({selectedLog.attempts.length} failed attempt{selectedLog.attempts.length > 1 ? "s" : ""})
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("fallback")}
+                  className="text-xs text-primary hover:underline flex items-center gap-1 font-medium"
+                >
+                  View full fallback chain
+                  <span className="material-symbols-outlined text-[14px]">arrow_forward</span>
+                </button>
+              </div>
+              <div className="space-y-2">
+                {selectedLog.attempts.map((att, idx) => (
+                  <div
+                    key={idx}
+                    className="p-3 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs flex flex-col gap-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-mono">
+                        <Badge variant="warning" size="sm">Attempt #{idx + 1}</Badge>
+                        <span className="font-semibold text-text-main">
+                          {att.provider ? `${att.provider}/${att.model || ""}` : (att.model || "Unknown")}
+                        </span>
+                      </div>
+                      <Badge variant={statusBadgeVariant(att.status, att.statusCode)} size="sm">
+                        {statusBadgeLabel(att.status, att.statusCode)}
+                      </Badge>
+                    </div>
+                    {(att.error || att.response?.error) && (
+                      <div className="text-[11px] font-mono text-red-600 dark:text-red-400 bg-red-500/10 p-2 rounded border border-red-500/20 whitespace-pre-wrap break-words">
+                        {att.error || att.response?.error}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (activeTab === "fallback") {
+      const attempts = Array.isArray(selectedLog.attempts) ? selectedLog.attempts : [];
+      const hasCombo = selectedLog.isCombo || selectedLog.comboName || attempts.length > 0;
+      const comboModels = selectedLog.comboModels || [];
+
+      return (
+        <div className="space-y-4">
+          <div className="p-3.5 rounded-lg border border-border-subtle bg-surface-2/40 flex flex-col gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[20px] text-primary">alt_route</span>
+                <span className="font-semibold text-text-main text-sm">
+                  {selectedLog.comboName ? `Combo: ${selectedLog.comboName}` : "Model Fallback & Routing"}
+                </span>
+                {selectedLog.comboStrategy && (
+                  <Badge variant="default" size="sm">
+                    Strategy: {selectedLog.comboStrategy}
+                  </Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 font-mono text-xs text-text-muted">
+                <span>Total Candidates: {comboModels.length || (attempts.length + (selectedLog.provider ? 1 : 0))}</span>
+                <span>•</span>
+                <span className={attempts.length > 0 ? "text-amber-500 font-semibold" : ""}>
+                  Failed: {attempts.length}
+                </span>
+              </div>
+            </div>
+
+            {comboModels.length > 0 && (
+              <div className="text-xs text-text-muted pt-1">
+                <div className="text-[11px] font-medium text-text-muted mb-1">Configured Model Chain:</div>
+                <div className="flex flex-wrap items-center gap-1 font-mono">
+                  {comboModels.map((m, idx) => {
+                    const isFinal = selectedLog.model && (m === selectedLog.model || m.endsWith(`/${selectedLog.model}`));
+                    const isFailed = attempts.some((att) => att.model === m || att.provider && m.includes(att.provider));
+                    return (
+                      <span key={idx} className="flex items-center gap-1">
+                        <span
+                          className={cn(
+                            "px-2 py-0.5 rounded text-[11px] border",
+                            isFinal
+                              ? "bg-green-500/15 border-green-500/30 text-green-700 dark:text-green-300 font-semibold"
+                              : isFailed
+                              ? "bg-red-500/10 border-red-500/30 text-red-600 dark:text-red-400 line-through"
+                              : "bg-surface border-border-subtle text-text-muted"
+                          )}
+                        >
+                          {idx + 1}. {m}
+                        </span>
+                        {idx < comboModels.length - 1 && <span className="text-text-muted">→</span>}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {attempts.length === 0 ? (
+            <div className="p-6 rounded-lg border border-dashed border-border-subtle text-center text-xs text-text-muted space-y-1">
+              <span className="material-symbols-outlined text-[24px] text-green-500">check_circle</span>
+              <p className="font-medium text-text-main">No fallback was triggered</p>
+              <p>The primary candidate served the request successfully on the first attempt.</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="text-xs font-semibold text-text-muted uppercase tracking-wider">
+                Execution Steps & Fallback Chain
+              </div>
+              {attempts.map((att, idx) => (
+                <div
+                  key={idx}
+                  className="rounded-lg border border-red-500/30 bg-surface overflow-hidden shadow-sm"
+                >
+                  <div className="px-3.5 py-2.5 bg-red-500/10 border-b border-red-500/20 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="material-symbols-outlined text-[16px] text-red-500">error</span>
+                      <span className="font-semibold text-text-main font-mono">
+                        Attempt #{idx + 1}: {att.provider ? `${att.provider}/${att.model || ""}` : (att.model || "Unknown")}
+                      </span>
+                      {att.providerName && (
+                        <span className="text-[11px] text-text-muted">({att.providerName})</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Badge variant={statusBadgeVariant(att.status || "error", att.statusCode)} size="sm">
+                        {statusBadgeLabel(att.status || "error", att.statusCode)}
+                      </Badge>
+                      <Badge variant="error" size="sm">
+                        FAILED
+                      </Badge>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 space-y-3 text-xs">
+                    {(att.error || att.response?.error) && (
+                      <div className="p-2.5 rounded bg-red-500/10 border border-red-500/20 font-mono text-red-600 dark:text-red-400 text-xs whitespace-pre-wrap break-words">
+                        <div className="font-bold text-[11px] mb-1">Failure Reason:</div>
+                        {att.error || att.response?.error}
+                      </div>
+                    )}
+
+                    {att.beforeModify && (
+                      <JsonBlock
+                        title={`Attempt #${idx + 1} Payload (Before Modify)`}
+                        data={att.beforeModify.body || att.beforeModify}
+                        defaultExpanded={false}
+                      />
+                    )}
+
+                    {att.afterModify && (
+                      <JsonBlock
+                        title={`Attempt #${idx + 1} Upstream Payload (After Modify)`}
+                        data={att.afterModify.body || att.afterModify}
+                        defaultExpanded={false}
+                      />
+                    )}
+
+                    {att.response && (
+                      <JsonBlock
+                        title={`Attempt #${idx + 1} Error Response`}
+                        data={att.response}
+                        defaultExpanded={false}
+                      />
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              {/* Final Successful or Terminal Attempt */}
+              <div className="rounded-lg border border-green-500/30 bg-surface overflow-hidden shadow-sm">
+                <div className="px-3.5 py-2.5 bg-green-500/10 border-b border-green-500/20 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="material-symbols-outlined text-[16px] text-green-500">
+                      {selectedLog.status === "error" ? "cancel" : "check_circle"}
+                    </span>
+                    <span className="font-semibold text-text-main font-mono">
+                      Final Attempt #{attempts.length + 1}: {selectedLog.provider ? `${selectedLog.provider}/${selectedLog.model || ""}` : (selectedLog.model || "Unknown")}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Badge variant={statusBadgeVariant(selectedLog.status, selectedLog.statusCode)} size="sm">
+                      {statusBadgeLabel(selectedLog.status, selectedLog.statusCode)}
+                    </Badge>
+                  </div>
+                </div>
+                <div className="p-3.5 text-xs text-text-muted">
+                  {selectedLog.status === "error"
+                    ? "Exhausted all fallback models. The final error was returned to the client."
+                    : "Fallback succeeded! This model fulfilled the request."}
+                </div>
+              </div>
+            </div>
           )}
         </div>
       );
@@ -1197,6 +1395,19 @@ export default function LogsPageClient() {
                             {item.apiType}
                           </span>
                         )}
+                        {(item.isCombo || item.fallbackCount > 0) && (
+                          <span
+                            className={cn(
+                              "px-1.5 py-0.5 rounded text-[10px] font-mono font-medium",
+                              item.fallbackCount > 0
+                                ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                                : "bg-purple-500/15 text-purple-600 dark:text-purple-400"
+                            )}
+                            title={item.fallbackCount > 0 ? `${item.fallbackCount} fallback attempt(s)` : "Combo model"}
+                          >
+                            COMBO{item.fallbackCount > 0 ? ` (${item.fallbackCount} retried)` : ""}
+                          </span>
+                        )}
                         {item.beforeMessageCount != null && item.afterMessageCount != null && (
                           <span
                             className={cn(
@@ -1265,6 +1476,11 @@ export default function LogsPageClient() {
                       {selectedLog.apiType}
                     </Badge>
                   )}
+                  {selectedLog.isCombo && (
+                    <Badge variant="warning" size="sm">
+                      COMBO
+                    </Badge>
+                  )}
                   <span className="text-sm font-semibold font-mono text-text-main truncate">
                     {selectedLog.clientModel || selectedLog.model || selectedLog.endpoint || selectedLog.id}
                   </span>
@@ -1310,12 +1526,18 @@ export default function LogsPageClient() {
               {/* Stage Tabs */}
               <div className="flex flex-wrap items-center gap-1 pt-1">
                 {DETAIL_TABS.map((tab) => {
-                  const hasData =
+                  let hasData =
                     tab.id === "raw" ||
                     (tab.id === "w2Capture"
                       ? Boolean(selectedLog.w2Capture?.captureCount > 0)
                       : Boolean(selectedLog[tab.id]));
-                  const w2Count = tab.id === "w2Capture" ? selectedLog.w2Capture?.captureCount || 0 : 0;
+                  let badgeCount = 0;
+                  if (tab.id === "w2Capture") {
+                    badgeCount = selectedLog.w2Capture?.captureCount || 0;
+                  } else if (tab.id === "fallback") {
+                    badgeCount = Array.isArray(selectedLog.attempts) ? selectedLog.attempts.length : 0;
+                    hasData = Boolean(selectedLog.isCombo || selectedLog.comboName || badgeCount > 0);
+                  }
                   return (
                     <button
                       key={tab.id}
@@ -1331,7 +1553,7 @@ export default function LogsPageClient() {
                       <span className="material-symbols-outlined text-[15px]">{tab.icon}</span>
                       <span>
                         {tab.label}
-                        {w2Count > 0 ? ` (${w2Count})` : ""}
+                        {badgeCount > 0 ? ` (${badgeCount})` : ""}
                       </span>
                       {!hasData && (
                         <span className="size-1.5 rounded-full bg-gray-400/60" title="Not captured for this request" />

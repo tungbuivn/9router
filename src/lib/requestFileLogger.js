@@ -167,6 +167,9 @@ function buildSummaryFromRecord(record, fileSizeBytes = 0) {
     latency: record.latency || null,
     tokens: record.tokens || null,
     error: record.response?.error || null,
+    isCombo: Boolean(record.isCombo),
+    comboName: record.comboName || null,
+    fallbackCount: Array.isArray(record.attempts) ? record.attempts.length : 0,
     w2CaptureCount: record.w2CaptureCount ?? record.w2Capture?.captureCount ?? 0,
     w2HasSystemPrompt: Boolean(record.w2HasSystemPrompt ?? record.w2Capture?.hasSystemPrompt),
     fileSizeBytes,
@@ -397,12 +400,17 @@ export async function updateRequestLogStage(id, stageName, stageData, summaryPat
     // If a fallback/retry begins a new beforeModify after a prior attempt, archive previous attempt summary
     if (stageName === "beforeModify" && record.beforeModify) {
       if (!Array.isArray(record.attempts)) record.attempts = [];
+      const prevAttemptNum = record.attempts.length + 1;
       record.attempts.push({
+        attemptIndex: prevAttemptNum,
         provider: record.provider,
+        providerName: record.providerName || null,
         model: record.model,
+        targetFormat: record.targetFormat || null,
         status: record.status,
         statusCode: record.statusCode,
         error: record.response?.error || null,
+        latency: record.latency || null,
         beforeModify: record.beforeModify,
         afterModify: record.afterModify,
         response: record.response,

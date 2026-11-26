@@ -226,10 +226,15 @@ describe("requestFileLogger (disk-backed rolling JSON store)", () => {
 
     const doc = await getRequestLogById(id);
     expect(doc.attempts).toHaveLength(1);
+    expect(doc.attempts[0].attemptIndex).toBe(1);
     expect(doc.attempts[0].provider).toBe("p1");
     expect(doc.attempts[0].statusCode).toBe(429);
     expect(doc.provider).toBe("p2");
     expect(doc.response.content).toBe("ok from p2");
+
+    const listRes = await listRequestLogs();
+    const item = listRes.items.find((x) => x.id === id);
+    expect(item.fallbackCount).toBe(1);
   });
 
   it("maskHeaders handles short secrets safely", () => {

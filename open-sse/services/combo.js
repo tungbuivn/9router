@@ -349,6 +349,7 @@ export function isZeroContentResponse(data) {
  * @param {boolean} [options.sessionSticky=true] - Keep chosen model across session requests to retain prompt cache
  * @param {number} [options.confidenceThreshold=0.8] - Minimum confidence required for model switch (0-1)
  * @param {Function|null} [options.resolveSmartChoice=null] - Smart router resolver callback: (body, models) => Promise<{ choice, probabilities, confidence } | null>
+ * @param {Function|null} [options.onAttemptFailed=null] - Callback when a candidate model in combo fails or falls through: ({ model, index, total, status, error, reason }) => Promise<void> | void
  * @returns {Promise<Response>}
  */
 export async function handleComboChat({
@@ -365,6 +366,7 @@ export async function handleComboChat({
   sessionSticky = true,
   confidenceThreshold = 0.8,
   resolveSmartChoice = null,
+  onAttemptFailed = null,
 }) {
   let rotatedModels = models;
   let activeStickyModel = null;
@@ -511,6 +513,18 @@ export async function handleComboChat({
                   }
                   lastError = "Zero usable content";
                   lastStatus = 200;
+                  if (typeof onAttemptFailed === "function") {
+                    try {
+                      await onAttemptFailed({
+                        model: modelStr,
+                        index: i + 1,
+                        total: rotatedModels.length,
+                        status: 200,
+                        error: "Model returned HTTP 200 with zero usable content",
+                        reason: "zero_content",
+                      });
+                    } catch {}
+                  }
                   continue;
                 }
               } catch {
@@ -546,6 +560,18 @@ export async function handleComboChat({
         peeked.response.body?.cancel?.().catch(() => {});
         lastError = `empty generation (${reasonLabel})`;
         if (!lastStatus) lastStatus = 502;
+        if (typeof onAttemptFailed === "function") {
+          try {
+            await onAttemptFailed({
+              model: modelStr,
+              index: i + 1,
+              total: rotatedModels.length,
+              status: 502,
+              error: `Empty generation (${reasonLabel})`,
+              reason: "empty_generation",
+            });
+          } catch {}
+        }
         continue;
       }
 
@@ -596,6 +622,18 @@ export async function handleComboChat({
         lastError = errorText || String(result.status);
         if (!lastStatus) lastStatus = result.status;
         if (!requestScopedResult) requestScopedResult = result;
+        if (typeof onAttemptFailed === "function") {
+          try {
+            await onAttemptFailed({
+              model: modelStr,
+              index: i + 1,
+              total: rotatedModels.length,
+              status: result.status,
+              error: errorText || `Request rejected (${result.status})`,
+              reason: "request_scoped_error",
+            });
+          } catch {}
+        }
         continue;
       }
 
@@ -612,6 +650,18 @@ export async function handleComboChat({
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
+      if (typeof onAttemptFailed === "function") {
+        try {
+          await onAttemptFailed({
+            model: modelStr,
+            index: i + 1,
+            total: rotatedModels.length,
+            status: result.status,
+            error: errorText || `Failed with status ${result.status}`,
+            reason: "fallback_error",
+          });
+        } catch {}
+      }
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
       if (comboStrategy === "smart" && sessionId && modelStr === activeStickyModel) {
@@ -620,6 +670,18 @@ export async function handleComboChat({
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
+      if (typeof onAttemptFailed === "function") {
+        try {
+          await onAttemptFailed({
+            model: modelStr,
+            index: i + 1,
+            total: rotatedModels.length,
+            status: 500,
+            error: lastError,
+            reason: "exception",
+          });
+        } catch {}
+      }
     }
   }
 

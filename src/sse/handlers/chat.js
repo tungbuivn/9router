@@ -188,6 +188,19 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
     const comboCfg = comboStrategies[modelStr] || {};
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
+    if (requestLogId) {
+      updateRequestLogStage(
+        requestLogId,
+        null,
+        undefined,
+        {
+          isCombo: true,
+          comboName: modelStr,
+          comboStrategy,
+          comboModels: augmentedModels,
+        }
+      ).catch(() => {});
+    }
     return await handleComboChat({
       body,
       models: augmentedModels,
@@ -203,6 +216,18 @@ export async function handleChat(request, clientRawRequest = null) {
       smartPolicy: comboCfg.smartPolicy || "smart",
       sessionSticky: comboCfg.sessionSticky !== false,
       confidenceThreshold: typeof comboCfg.confidenceThreshold === "number" ? comboCfg.confidenceThreshold : 0.8,
+      onAttemptFailed: requestLogId
+        ? (failedInfo) => {
+            updateRequestLogStage(
+              requestLogId,
+              null,
+              undefined,
+              {
+                lastComboError: failedInfo,
+              }
+            ).catch(() => {});
+          }
+        : null,
       resolveSmartChoice: comboStrategy === "smart"
         ? (b, m) => resolveSmartChoice({
             body: b,
@@ -220,6 +245,19 @@ export async function handleChat(request, clientRawRequest = null) {
   if (soloAugmented.length > 1) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
+    if (requestLogId) {
+      updateRequestLogStage(
+        requestLogId,
+        null,
+        undefined,
+        {
+          isCombo: true,
+          comboName: modelStr,
+          comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings),
+          comboModels: soloAugmented,
+        }
+      ).catch(() => {});
+    }
     return await handleComboChat({
       body,
       models: soloAugmented,
@@ -229,7 +267,19 @@ export async function handleChat(request, clientRawRequest = null) {
       ),
       log,
       comboName: modelStr,
-      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings)
+      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings),
+      onAttemptFailed: requestLogId
+        ? (failedInfo) => {
+            updateRequestLogStage(
+              requestLogId,
+              null,
+              undefined,
+              {
+                lastComboError: failedInfo,
+              }
+            ).catch(() => {});
+          }
+        : null,
     });
   }
 
@@ -287,6 +337,20 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const nestedSession = resolveSessionIdentity({ headers: clientRawRequest?.headers, body });
       const nestedSessionId = nestedSession?.sessionId || null;
       log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
+      const activeLogId = clientRawRequest?.requestLogId || null;
+      if (activeLogId) {
+        updateRequestLogStage(
+          activeLogId,
+          null,
+          undefined,
+          {
+            isCombo: true,
+            comboName: modelStr,
+            comboStrategy,
+            comboModels: augmentedModels,
+          }
+        ).catch(() => {});
+      }
       return handleComboChat({
         body,
         models: augmentedModels,
@@ -302,6 +366,18 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         smartPolicy: comboCfg.smartPolicy || "smart",
         sessionSticky: comboCfg.sessionSticky !== false,
         confidenceThreshold: typeof comboCfg.confidenceThreshold === "number" ? comboCfg.confidenceThreshold : 0.8,
+        onAttemptFailed: activeLogId
+          ? (failedInfo) => {
+              updateRequestLogStage(
+                activeLogId,
+                null,
+                undefined,
+                {
+                  lastComboError: failedInfo,
+                }
+              ).catch(() => {});
+            }
+          : null,
         resolveSmartChoice: comboStrategy === "smart"
           ? (b, m) => resolveSmartChoice({
               body: b,
