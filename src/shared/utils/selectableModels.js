@@ -36,12 +36,19 @@ export const NO_AUTH_PROVIDER_IDS = Object.keys(AI_PROVIDERS)
 
 // Providers with per-account live catalogs via /api/providers/[id]/models.
 // Static registry stays as fallback when live fetch fails or is empty.
-// zed added in #4244: its backend customResolver already returns live models
-// but the frontend omitted it, hiding Zed entirely from the Combo picker.
-// Providers with per-account live catalogs via /api/providers/[id]/models.
 // Single source of truth: ModelSelectModal and the CLI-tool cards import this, so a
 // provider supported by that route cannot be missing from just one picker.
-export const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "zed", "claude", "commandcode"];
+//
+// zed added in #4244: its backend customResolver already returned live models
+// but the frontend omitted it, hiding Zed entirely from the Combo picker.
+//
+// kiro: the registry's static list is a superset of what any one plan sells —
+// it hardcodes opus 5.5/5/4.8/4.7/4.5, sonnet-5 and gpt-5.6-*, and Kiro answers
+// every id the account does not own with `400 INVALID_MODEL_ID`. Listing it as
+// static therefore offers models that are guaranteed to fail. Its route already
+// exposes ListAvailableModels (per-account truth), and leaving it out here is
+// what made the picker disagree with /v1/models.
+export const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "zed", "claude", "commandcode", "kiro"];
 
 /**
  * Capabilities carried by a live catalog row, when the provider reports any.

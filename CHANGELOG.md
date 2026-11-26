@@ -5,6 +5,7 @@
 - **Kiro**: import the session of a locally installed `kiro-cli` — the CLI's own data file (`~/.local/share/kiro-cli/data.sqlite3`, table `auth_kv`), the OS keyring or `~/.kiro` are read first, and when nothing is found the credentials are captured from a Whistle (w2) proxy on 127.0.0.1:8899 (bearer token from the Kiro runtime calls, refresh token from the captured OIDC/auth-service token request).
 
 ## Fixes
+- **Kiro**: stop offering models the account cannot use. The model picker listed the registry's static Kiro catalog, which hardcodes models the current plans no longer sell (`claude-opus-5.5/5/4.8/4.7/4.5`, `claude-sonnet-5`, `gpt-5.6-*`); Kiro answers every id the account does not own with `400 INVALID_MODEL_ID`, so picking one failed on the first request. `kiro` now reads its per-account `ListAvailableModels` catalog like Cursor/Cline/Zed do, keeping the picker in agreement with `/v1/models` and surfacing models the static list was missing (`minimax-m2.1`).
 - **Claude Code**: the CLI Tools → Claude "Apply" button now writes `CLAUDE_CODE_AUTO_MODE_SERVER=0` to `~/.claude/settings.json`, so Claude Code's own auto-mode listener stays off and traffic goes to 9router only. The key is written on every Apply (a stale `1` can no longer survive the button), and `9router connect --tools claude` writes the same value. Applying to a hand-edited `settings.json` with trailing commas no longer fails with a 500 — the JSONC that Claude Code itself writes is now parsed on the Apply and Reset paths, not just on read.
 
 # v0.5.123 (2026-11-22)
