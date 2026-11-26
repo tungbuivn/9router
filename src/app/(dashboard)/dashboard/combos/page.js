@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -8,8 +9,9 @@ import { restrictToVerticalAxis, restrictToParentElement } from "@dnd-kit/modifi
 import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModal, CapacityBadges, Select, Toggle, Badge, SmartPolicyModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
-import { aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
-import { resolveProviderId, AI_PROVIDERS } from "@/shared/constants/providers";
+import { aggregateComboCapabilities, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { resolveProviderId, AI_PROVIDERS, getProviderAlias, ALIAS_TO_ID } from "@/shared/constants/providers";
+import { formatContextLabel, getContextGroupKey, buildContextComboGroups } from "@/shared/utils/autoCombo";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
@@ -70,6 +72,7 @@ export default function CombosPage() {
   const [combos, setCombos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showAutoComboModal, setShowAutoComboModal] = useState(false);
   const [editingCombo, setEditingCombo] = useState(null);
   const [activeProviders, setActiveProviders] = useState([]);
   const [comboStrategies, setComboStrategies] = useState({});
@@ -233,6 +236,9 @@ export default function CombosPage() {
       });
       if (res.ok) {
         await fetchData();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("customModelChanged"));
+        }
         setShowCreateModal(false);
       } else {
         const err = await res.json();
@@ -252,6 +258,9 @@ export default function CombosPage() {
       });
       if (res.ok) {
         await fetchData();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("customModelChanged"));
+        }
         setEditingCombo(null);
       } else {
         const err = await res.json();
@@ -431,9 +440,20 @@ export default function CombosPage() {
               </button>
             )}
           </div>
-          <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto whitespace-nowrap">
-            Create Combo
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button icon="add" onClick={() => setShowCreateModal(true)} className="flex-1 sm:flex-initial whitespace-nowrap">
+              Create Combo
+            </Button>
+            <Button
+              variant="secondary"
+              icon="auto_awesome"
+              onClick={() => setShowAutoComboModal(true)}
+              className="flex-1 sm:flex-initial whitespace-nowrap"
+              title="Automatically generate combos grouping models with the same context"
+            >
+              Auto Combo
+            </Button>
+          </div>
           <div className="hidden">
             <Button
               variant="secondary"
@@ -470,9 +490,14 @@ export default function CombosPage() {
             </div>
             <p className="text-text-main font-medium mb-1">No combos yet</p>
             <p className="text-sm text-text-muted mb-4">Create model combos with fallback support</p>
-            <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto">
-              Create Combo
-            </Button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto">
+                Create Combo
+              </Button>
+              <Button variant="secondary" icon="auto_awesome" onClick={() => setShowAutoComboModal(true)} className="w-full sm:w-auto">
+                Auto Combo
+              </Button>
+            </div>
           </div>
         </Card>
       ) : (
@@ -595,6 +620,8 @@ export default function CombosPage() {
           onClose={() => setShowCreateModal(false)}
           onSave={handleCreate}
           activeProviders={activeProviders}
+          getCaps={getCaps}
+          comboByName={Object.fromEntries(combos.map((c) => [c.name, c.models]))}
         />
       )}
 
@@ -606,6 +633,24 @@ export default function CombosPage() {
           onClose={() => setEditingCombo(null)}
           onSave={(data) => handleUpdate(editingCombo.id, data)}
           activeProviders={activeProviders}
+          getCaps={getCaps}
+          comboByName={Object.fromEntries(combos.map((c) => [c.name, c.models]))}
+        />
+      )}
+
+      {/* Auto Combo Modal */}
+      {showAutoComboModal && (
+        <AutoComboModal
+          isOpen={showAutoComboModal}
+          onClose={() => setShowAutoComboModal(false)}
+          combos={combos}
+          activeProviders={activeProviders}
+          onCreated={async () => {
+            await fetchData();
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new Event("customModelChanged"));
+            }
+          }}
         />
       )}
 
@@ -624,14 +669,21 @@ export default function CombosPage() {
   );
 }
 
-const fmtK = (n) => {
-  if (!n) return "?";
-  if (n >= 1000000) {
-    const m = n / 1000000;
-    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+const fmtK = formatContextLabel;
+
+function resolveModelCaps(modelStr, comboByName = {}, getCaps = null) {
+  if (!modelStr) return null;
+  if (comboByName[modelStr]) {
+    return aggregateComboCapabilities(comboByName[modelStr], comboByName, getCaps);
   }
-  return `${Math.round(n / 1000)}k`;
-};
+  const fromHook = getCaps?.(modelStr);
+  if (fromHook?.contextWindow) return fromHook;
+  const slash = modelStr.indexOf("/");
+  const alias = slash !== -1 ? modelStr.slice(0, slash) : null;
+  const bare = slash !== -1 ? modelStr.slice(slash + 1) : modelStr;
+  const provider = alias ? (ALIAS_TO_ID[alias] || alias) : null;
+  return getCapabilitiesForModel(provider, bare);
+}
 
 function getRouterModelStatus(routerModel, activeProviders) {
   const effectiveModel = (typeof routerModel === "string" && routerModel.trim())
@@ -668,6 +720,11 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
   // generic patterns and under-report the limits. getCaps carries the server's
   // answer for /api/models.
   const comboCaps = aggregateComboCapabilities(combo.models, comboByName, getCaps);
+  const firstModel = combo.models?.[0];
+  const firstCaps = firstModel ? resolveModelCaps(firstModel, comboByName, getCaps) : null;
+  // Combo contextWindow and maxOutput are taken from the first item (primary model)
+  const contextWindow = firstCaps?.contextWindow ?? comboCaps?.contextWindow;
+  const maxOutput = firstCaps?.maxOutput ?? comboCaps?.maxOutput;
 
   return (
     <Card padding="sm" className={`group ${selected ? "ring-1 ring-primary/40 bg-primary/[0.03]" : ""}`}>
@@ -709,9 +766,9 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
             </div>
             {comboCaps && (
               <div className="mt-1 flex items-center gap-2 text-[10px] text-text-muted">
-                <span>ctx {fmtK(comboCaps.contextWindow)}</span>
+                <span>ctx {fmtK(contextWindow)}</span>
                 <span className="opacity-40">·</span>
-                <span>max {fmtK(comboCaps.maxOutput)}</span>
+                <span>max {fmtK(maxOutput)}</span>
               </div>
             )}
             {/* Fusion: judge picker (Auto = first model) */}
@@ -1177,7 +1234,7 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
   );
 }
 
-function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null }) {
+function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null, getCaps, comboByName = {} }) {
   // Initialize state with combo values - key prop on parent handles reset on remount
   const [name, setName] = useState(combo?.name || "");
   const [models, setModels] = useState(combo?.models || []);
@@ -1185,11 +1242,71 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   const [saving, setSaving] = useState(false);
   const [nameError, setNameError] = useState("");
   const [modelAliases, setModelAliases] = useState({});
+  const [autoAdding, setAutoAdding] = useState(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
+
+  const firstModel = models[0];
+  const primaryCaps = firstModel ? resolveModelCaps(firstModel, comboByName, getCaps) : null;
+
+  const handleAutoAddSameContext = async () => {
+    if (!primaryCaps?.contextWindow) return;
+    setAutoAdding(true);
+    try {
+      const res = await fetch("/api/models");
+      if (!res.ok) return;
+      const data = await res.json();
+      const allModels = data.models || [];
+      const targetKey = getContextGroupKey(primaryCaps.contextWindow);
+
+      const activeSet = new Set();
+      for (const c of activeProviders || []) {
+        if (c.provider) activeSet.add(c.provider);
+        if (c.name) activeSet.add(c.name);
+        const prefix = c.providerSpecificData?.prefix;
+        if (prefix) activeSet.add(prefix);
+        const alias = getProviderAlias(c.provider);
+        if (alias) activeSet.add(alias);
+      }
+      const noAuth = Object.keys(AI_PROVIDERS).filter((id) => AI_PROVIDERS[id]?.noAuth && !AI_PROVIDERS[id]?.hidden);
+      for (const id of noAuth) {
+        activeSet.add(id);
+        const alias = getProviderAlias(id);
+        if (alias) activeSet.add(alias);
+      }
+
+      const sameContextIds = [];
+      const seen = new Set(models);
+
+      for (const m of allModels) {
+        if (m.provider === "combo" || m.provider === "alias") continue;
+        const full = m.fullModel || m.routedModel || "";
+        if (!full || seen.has(full)) continue;
+        const slash = full.indexOf("/");
+        const prefix = slash > 0 ? full.slice(0, slash) : m.provider;
+        if (activeSet.has(prefix) || activeSet.has(m.provider)) {
+          const c = m.caps || {};
+          if (c.contextWindow && getContextGroupKey(c.contextWindow) === targetKey) {
+            seen.add(full);
+            sameContextIds.push(full);
+          }
+        }
+      }
+
+      if (sameContextIds.length === 0) {
+        alert(`All available models with ${fmtK(primaryCaps.contextWindow)} context are already in this combo.`);
+        return;
+      }
+      setModels((prev) => [...prev, ...sameContextIds]);
+    } catch (err) {
+      console.error("Failed to auto-add models with same context:", err);
+    } finally {
+      setAutoAdding(false);
+    }
+  };
 
   // Use stable index-based IDs so duplicates and similar names are handled correctly
   const modelItems = models.map((model, i) => ({ uid: `item-${i}`, model }));
@@ -1301,7 +1418,31 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
 
           {/* Models */}
           <div>
-            <label className="text-sm font-medium mb-1.5 block">Models</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-sm font-medium">Models</label>
+              {models.length > 0 && primaryCaps && (
+                <span className="text-[11px] text-text-muted">
+                  ctx <span className="font-semibold text-text-main font-mono">{fmtK(primaryCaps.contextWindow)}</span> · max <span className="font-semibold text-text-main font-mono">{fmtK(primaryCaps.maxOutput)}</span>
+                </span>
+              )}
+            </div>
+
+            {models.length > 0 && (
+              <div className="mb-2 flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-border/60 text-xs">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-text-muted text-[11px] shrink-0">Item #1 (primary):</span>
+                  <code className="font-mono text-primary text-[11px] truncate max-w-[180px] sm:max-w-[240px]">
+                    {firstModel}
+                  </code>
+                </div>
+                {primaryCaps && (
+                  <div className="flex items-center gap-1.5 text-[11px] font-mono shrink-0">
+                    <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium">ctx {fmtK(primaryCaps.contextWindow)}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium">max {fmtK(primaryCaps.maxOutput)}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {models.length === 0 ? (
               <div className="text-center py-4 border border-dashed border-black/10 dark:border-white/10 rounded-lg bg-black/[0.01] dark:bg-white/[0.01]">
@@ -1343,6 +1484,19 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
               <span className="material-symbols-outlined text-[16px]">add</span>
               Add Model
             </button>
+
+            {models.length > 0 && primaryCaps?.contextWindow && (
+              <button
+                type="button"
+                onClick={handleAutoAddSameContext}
+                disabled={autoAdding}
+                className="w-full mt-1.5 py-1.5 border border-dashed border-primary/30 hover:border-primary/60 bg-primary/[0.02] hover:bg-primary/[0.06] rounded-lg text-xs text-primary font-medium transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                title={`Auto-add other available models that have ${fmtK(primaryCaps.contextWindow)} context window`}
+              >
+                <span className="material-symbols-outlined text-[15px]">auto_awesome</span>
+                {autoAdding ? "Adding models..." : `Auto-add models with same context (${fmtK(primaryCaps.contextWindow)})`}
+              </button>
+            )}
           </div>
 
           {/* Actions */}
@@ -1378,5 +1532,353 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
         />
       )}
     </>
+  );
+}
+
+function AutoComboModal({ isOpen, onClose, combos = [], activeProviders = [], onCreated }) {
+  const [loading, setLoading] = useState(true);
+  const [groups, setGroups] = useState([]);
+  const [generating, setGenerating] = useState(false);
+  const [selectedGroups, setSelectedGroups] = useState({});
+  const [groupNames, setGroupNames] = useState({});
+  const [expandedGroups, setExpandedGroups] = useState({});
+  const [groupSelectedModels, setGroupSelectedModels] = useState({});
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let alive = true;
+
+    fetch("/api/models")
+      .then((r) => r.json())
+      .then((data) => {
+        if (!alive) return;
+        const allModels = data.models || [];
+
+        const activeSet = new Set();
+        for (const c of activeProviders || []) {
+          if (c.provider) activeSet.add(c.provider);
+          if (c.name) activeSet.add(c.name);
+          const prefix = c.providerSpecificData?.prefix;
+          if (prefix) activeSet.add(prefix);
+          const alias = getProviderAlias(c.provider);
+          if (alias) activeSet.add(alias);
+        }
+        const noAuth = Object.keys(AI_PROVIDERS).filter((id) => AI_PROVIDERS[id]?.noAuth && !AI_PROVIDERS[id]?.hidden);
+        for (const id of noAuth) {
+          activeSet.add(id);
+          const alias = getProviderAlias(id);
+          if (alias) activeSet.add(alias);
+        }
+
+        const activeModels = [];
+        const seen = new Set();
+        for (const m of allModels) {
+          if (m.provider === "combo" || m.provider === "alias") continue;
+          const full = m.fullModel || m.routedModel || "";
+          if (!full || seen.has(full)) continue;
+          const slash = full.indexOf("/");
+          const prefix = slash > 0 ? full.slice(0, slash) : m.provider;
+          if (activeSet.has(prefix) || activeSet.has(m.provider)) {
+            seen.add(full);
+            const caps = m.caps || {};
+            if (caps.contextWindow && Number.isFinite(caps.contextWindow) && caps.contextWindow > 0) {
+              activeModels.push({
+                id: full,
+                name: m.name || full,
+                caps,
+                contextWindow: caps.contextWindow,
+                maxOutput: caps.maxOutput,
+              });
+            }
+          }
+        }
+
+        const existingNames = (combos || []).map((c) => c.name);
+        const builtGroups = buildContextComboGroups(activeModels, existingNames);
+        setGroups(builtGroups);
+
+        const initialSel = {};
+        const initialNames = {};
+        const initialModels = {};
+        for (const g of builtGroups) {
+          initialSel[g.key] = true;
+          initialNames[g.key] = g.suggestedName;
+          initialModels[g.key] = new Set(g.models.map((m) => m.id));
+        }
+        setSelectedGroups(initialSel);
+        setGroupNames(initialNames);
+        setGroupSelectedModels(initialModels);
+      })
+      .catch((err) => {
+        console.error("Failed to load models for auto combo:", err);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [isOpen, activeProviders, combos]);
+
+  const toggleGroup = (key) => {
+    setSelectedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const toggleModelInGroup = (groupKey, modelId) => {
+    setGroupSelectedModels((prev) => {
+      const current = new Set(prev[groupKey] || []);
+      if (current.has(modelId)) current.delete(modelId);
+      else current.add(modelId);
+      return { ...prev, [groupKey]: current };
+    });
+  };
+
+  const toggleExpand = (key) => {
+    setExpandedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleNameChange = (key, val) => {
+    setGroupNames((prev) => ({ ...prev, [key]: val }));
+  };
+
+  const handleGenerate = async () => {
+    const toCreate = groups
+      .filter((g) => selectedGroups[g.key])
+      .map((g) => {
+        const selectedSet = groupSelectedModels[g.key] || new Set();
+        const selectedList = g.models.filter((m) => selectedSet.has(m.id)).map((m) => m.id);
+        return {
+          name: (groupNames[g.key] || g.suggestedName).trim(),
+          models: selectedList,
+          contextLabel: g.label,
+        };
+      })
+      .filter((g) => g.name && g.models.length > 0);
+
+    if (toCreate.length === 0) {
+      alert("No combos selected or selected combos have no models.");
+      return;
+    }
+
+    setGenerating(true);
+    let createdCount = 0;
+    const errors = [];
+
+    for (const item of toCreate) {
+      try {
+        const res = await fetch("/api/combos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: item.name, models: item.models }),
+        });
+        if (res.ok) {
+          createdCount++;
+        } else {
+          const err = await res.json().catch(() => ({}));
+          errors.push(`${item.name}: ${err.error || "Failed"}`);
+        }
+      } catch (e) {
+        errors.push(`${item.name}: ${e.message}`);
+      }
+    }
+
+    setGenerating(false);
+
+    if (createdCount > 0) {
+      await onCreated();
+      if (errors.length > 0) {
+        alert(`Created ${createdCount} combo(s). Failed: ${errors.join(", ")}`);
+      }
+      onClose();
+    } else if (errors.length > 0) {
+      alert(`Failed to create combos:\n${errors.join("\n")}`);
+    }
+  };
+
+  const selectedCount = groups.filter((g) => selectedGroups[g.key]).length;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Auto Combo — Group by Context Window">
+      <div className="flex flex-col gap-4">
+        <p className="text-xs text-text-muted">
+          Generate combos grouping active models that share the same context window. The first model in each combo will determine its <code className="font-mono text-primary font-semibold">ctx</code> and <code className="font-mono text-primary font-semibold">max</code> limits.
+        </p>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-10 text-text-muted gap-2 text-sm">
+            <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
+            <span>Analyzing models and context windows...</span>
+          </div>
+        ) : groups.length === 0 ? (
+          <div className="py-8 text-center text-sm text-text-muted">
+            No active models with context window metadata found.
+          </div>
+        ) : (
+          <div className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1">
+            {groups.map((g) => {
+              const isSelected = !!selectedGroups[g.key];
+              const isExpanded = !!expandedGroups[g.key];
+              const selectedModels = groupSelectedModels[g.key] || new Set();
+              const selectedModelCount = g.models.filter((m) => selectedModels.has(m.id)).length;
+              const firstItem = g.models[0];
+
+              return (
+                <div
+                  key={g.key}
+                  className={`rounded-lg border transition-colors ${
+                    isSelected
+                      ? "border-primary/40 bg-primary/[0.02]"
+                      : "border-border/60 bg-black/[0.01] dark:bg-white/[0.01] opacity-70"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleGroup(g.key)}
+                        className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-medium text-sm text-text-main">{g.label} Context</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-primary/10 text-primary">
+                            ctx {g.label}
+                          </span>
+                          {firstItem?.caps?.maxOutput && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-black/5 dark:bg-white/5 text-text-muted">
+                              max {fmtK(firstItem.caps.maxOutput)}
+                            </span>
+                          )}
+                          <span className="text-[11px] text-text-muted">
+                            ({selectedModelCount}/{g.models.length} models)
+                          </span>
+                          {g.alreadyExists && (
+                            <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                              combo-{g.key} exists
+                            </span>
+                          )}
+                        </div>
+                        {/* Combo name input */}
+                        <div className="mt-2 flex items-center gap-1.5">
+                          <span className="text-xs text-text-muted shrink-0">Name:</span>
+                          <input
+                            type="text"
+                            value={groupNames[g.key] || ""}
+                            onChange={(e) => handleNameChange(g.key, e.target.value)}
+                            disabled={!isSelected}
+                            className="flex-1 min-w-0 rounded border border-border bg-surface px-2 py-1 font-mono text-xs text-text-main focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40 disabled:opacity-50"
+                            placeholder={g.suggestedName}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => toggleExpand(g.key)}
+                      className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors self-end sm:self-center shrink-0 cursor-pointer"
+                    >
+                      <span>{isExpanded ? "Hide models" : "View models"}</span>
+                      <span className={`material-symbols-outlined text-[16px] transition-transform ${isExpanded ? "rotate-180" : ""}`}>
+                        expand_more
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Expandable models list */}
+                  {isExpanded && (
+                    <div className="border-t border-border/40 px-3 py-2 bg-black/[0.015] dark:bg-white/[0.015]">
+                      <div className="mb-1.5 text-[11px] text-text-muted flex items-center justify-between">
+                        <span>Models in this combo:</span>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setGroupSelectedModels((prev) => ({
+                                ...prev,
+                                [g.key]: new Set(g.models.map((m) => m.id)),
+                              }));
+                            }}
+                            className="text-[10px] text-primary hover:underline cursor-pointer"
+                          >
+                            Select all
+                          </button>
+                          <span className="opacity-30">|</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setGroupSelectedModels((prev) => ({
+                                ...prev,
+                                [g.key]: new Set(),
+                              }));
+                            }}
+                            className="text-[10px] text-text-muted hover:text-text-main hover:underline cursor-pointer"
+                          >
+                            Deselect all
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-1 max-h-[160px] overflow-y-auto">
+                        {g.models.map((m, idx) => {
+                          const isModelChecked = selectedModels.has(m.id);
+                          return (
+                            <label
+                              key={m.id}
+                              className={`flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer select-none transition-colors ${
+                                isModelChecked
+                                  ? "hover:bg-black/5 dark:hover:bg-white/5 text-text-main"
+                                  : "text-text-muted/60 hover:bg-black/5 dark:hover:bg-white/5"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isModelChecked}
+                                onChange={() => toggleModelInGroup(g.key, m.id)}
+                                className="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer shrink-0"
+                              />
+                              <span className="text-[10px] text-text-muted font-mono w-4 shrink-0">#{idx + 1}</span>
+                              <code className="font-mono text-[11px] truncate flex-1">{m.id}</code>
+                              {idx === 0 && (
+                                <span className="text-[9px] px-1 py-0.2 rounded bg-primary/10 text-primary font-medium shrink-0">
+                                  item #1 (primary)
+                                </span>
+                              )}
+                              {m.caps?.maxOutput && (
+                                <span className="text-[10px] text-text-muted font-mono shrink-0">
+                                  max {fmtK(m.caps.maxOutput)}
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="flex flex-col gap-2 pt-2 sm:flex-row border-t border-border">
+          <Button onClick={onClose} variant="ghost" fullWidth size="sm" disabled={generating}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleGenerate}
+            fullWidth
+            size="sm"
+            variant="primary"
+            disabled={loading || selectedCount === 0 || generating}
+            loading={generating}
+            icon="auto_awesome"
+          >
+            {generating ? "Generating..." : `Generate ${selectedCount} Combo${selectedCount === 1 ? "" : "s"}`}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

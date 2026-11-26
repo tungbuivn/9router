@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Features
+- **Combos**: context window and max output limits on `/dashboard/combos` are now driven by the combo's first (primary) model, so updating or reordering models immediately refreshes its `ctx` (e.g. 1M) and `max` (e.g. 131k) badges. Added an **Auto Combo** button on `/dashboard/combos` to automatically group active models by matching context window into combos, as well as an **Auto-add same context** action in the combo editor to quickly populate other models sharing the primary model's context window.
 - **Kiro**: import the session of a locally installed `kiro-cli` — the CLI's own data file (`~/.local/share/kiro-cli/data.sqlite3`, table `auth_kv`), the OS keyring or `~/.kiro` are read first, and when nothing is found the credentials are captured from a Whistle (w2) proxy on 127.0.0.1:8899 (bearer token from the Kiro runtime calls, refresh token from the captured OIDC/auth-service token request).
 
 ## Fixes

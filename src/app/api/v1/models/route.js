@@ -626,8 +626,12 @@ export async function buildModelsList(kindFilter, options = {}) {
       // published no limits at all, which leaves a client to guess from the name —
       // and it guesses high (see the snake_case note on the per-provider path).
       const { contextWindow, maxOutput } = comboSeatLimits(combo, combosByName, new Set(), resolveSeatCaps);
-      if (Number.isFinite(contextWindow)) entry.context_length = contextWindow;
-      if (Number.isFinite(maxOutput)) entry.max_completion_tokens = maxOutput;
+      const firstSeat = (combo.models || [])[0];
+      const firstCaps = firstSeat ? resolveSeatCaps(firstSeat) || getCapabilitiesForModel(null, firstSeat) : null;
+      const finalContext = firstCaps?.contextWindow ?? contextWindow;
+      const finalMax = firstCaps?.maxOutput ?? maxOutput;
+      if (Number.isFinite(finalContext)) entry.context_length = finalContext;
+      if (Number.isFinite(finalMax)) entry.max_completion_tokens = finalMax;
     }
     models.push(entry);
   }

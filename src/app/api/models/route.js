@@ -241,6 +241,17 @@ export async function GET() {
         }
       }
 
+      const firstSeat = (combo.models || [])[0];
+      let firstSeatCaps = null;
+      if (typeof firstSeat === "string") {
+        const matched = models.find(
+          (m) => m.fullModel === firstSeat || m.routedModel === firstSeat || m.model === firstSeat
+        );
+        firstSeatCaps = matched?.caps || (await resolveSeatCapabilities(firstSeat, { connections, nodes }));
+      }
+      const finalContext = firstSeatCaps?.contextWindow ?? (Number.isFinite(comboContext) ? comboContext : undefined);
+      const finalMaxOutput = firstSeatCaps?.maxOutput ?? (Number.isFinite(comboMaxOutput) ? comboMaxOutput : undefined);
+
       if (!seenFull.has(combo.name)) {
         seenFull.add(combo.name);
         models.push({
@@ -254,8 +265,8 @@ export async function GET() {
             vision: hasVision,
             search: hasSearch,
             reasoning: hasReasoning,
-            contextWindow: Number.isFinite(comboContext) ? comboContext : undefined,
-            maxOutput: Number.isFinite(comboMaxOutput) ? comboMaxOutput : undefined,
+            contextWindow: finalContext,
+            maxOutput: finalMaxOutput,
           },
         });
       }
