@@ -15,6 +15,8 @@ export default function Modal({
   closeOnOverlay = true,
   showTrafficLights = true,
   className,
+  style = {},
+  width,
 }) {
   const sizes = {
     sm: "max-w-sm",
@@ -58,9 +60,10 @@ export default function Modal({
           "border border-border-subtle",
           "rounded-[14px] shadow-[var(--shadow-elev)]",
           "fade-in",
-          sizes[size],
+          width ? null : sizes[size],
           className
         )}
+        style={width ? { width, maxWidth: "none", ...style } : style}
       >
         {/* Header */}
         {(title || showTrafficLights) && (

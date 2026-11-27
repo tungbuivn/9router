@@ -1157,6 +1157,14 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
   };
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(model);
+  
+  // Sync draft when model prop changes (e.g., after auto-add), but only if not currently editing
+  useEffect(() => {
+    if (!editing) {
+      setDraft(model);
+    }
+  }, [model, editing]);
+  
   const commit = () => {
     const trimmed = draft.trim();
     if (trimmed && trimmed !== model) onEdit(trimmed);
@@ -1206,7 +1214,7 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
       ) : (
         <div
           className="min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs text-text-main hover:bg-black/5 dark:hover:bg-white/5"
-          onClick={() => setEditing(true)}
+          onClick={(e) => { e.stopPropagation(); e.preventDefault(); setEditing(true); }}
           title="Click to edit"
         >
           {model}
@@ -1411,8 +1419,9 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
         isOpen={isOpen}
         onClose={onClose}
         title={isEdit ? "Edit Combo" : "Create Combo"}
+        width="800px"
       >
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-4">
           {/* Name */}
           <div>
             <Input

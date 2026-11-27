@@ -12,6 +12,14 @@ const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
 function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(model);
+  
+  // Sync draft when model prop changes (e.g., after auto-add), but only if not currently editing
+  useEffect(() => {
+    if (!editing) {
+      setDraft(model);
+    }
+  }, [model, editing]);
+  
   const commit = () => {
     const trimmed = draft.trim();
     if (trimmed && trimmed !== model) onEdit(trimmed);
@@ -30,7 +38,7 @@ function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown
           className="min-w-0 flex-1 rounded border border-primary/40 bg-white px-1.5 py-0.5 font-mono text-xs text-text-main outline-none dark:bg-black/20" />
       ) : (
         <div className="min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs text-text-main hover:bg-black/5 dark:hover:bg-white/5"
-          onClick={() => setEditing(true)} title="Click to edit">{model}</div>
+          onClick={(e) => { e.stopPropagation(); e.preventDefault(); setEditing(true); }} title="Click to edit">{model}</div>
       )}
       <div className="flex shrink-0 items-center gap-0.5">
         <button onClick={onMoveUp} disabled={isFirst}
@@ -110,16 +118,16 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
 
   return (
     <>
-      <Modal isOpen={isOpen} onClose={onClose} title={title || (isEdit ? "Edit Combo" : "Create Combo")}>
-        <div className="flex flex-col gap-3">
+      <Modal isOpen={isOpen} onClose={onClose} title={title || (isEdit ? "Edit Combo" : "Create Combo")} width="800px">
+        <div className="flex flex-col gap-4">
           <div>
             {forcePrefix ? (
               <>
                 <label className="text-sm font-medium mb-1 block">Combo Name</label>
                 <div className="flex items-stretch">
-                  <span className="inline-flex items-center px-2 rounded-l border border-r-0 border-black/10 dark:border-white/10 bg-black/[0.04] dark:bg-white/[0.04] text-text-muted font-mono text-sm">{forcePrefix}</span>
+                  <span className="inline-flex items-center px-3 rounded-l border border-r-0 border-black/10 dark:border-white/10 bg-black/[0.04] dark:bg-white/[0.04] text-text-muted font-mono text-sm">{forcePrefix}</span>
                   <input value={name} onChange={handleNameChange} placeholder="my-combo"
-                    className="flex-1 min-w-0 rounded-r border border-black/10 dark:border-white/10 bg-white dark:bg-black/20 px-2 py-1.5 font-mono text-sm outline-none focus:border-primary" />
+                    className="flex-1 min-w-0 rounded-r border border-black/10 dark:border-white/10 bg-white dark:bg-black/20 px-3 py-2 font-mono text-sm outline-none focus:border-primary" />
                 </div>
                 {nameError && <p className="text-[11px] text-red-500 mt-0.5">{nameError}</p>}
               </>
@@ -139,7 +147,7 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
                 <p className="text-xs text-text-muted">No models added yet</p>
               </div>
             ) : (
-              <div className="flex max-h-[55vh] min-w-0 flex-col gap-1 overflow-y-auto sm:max-h-[350px]">
+              <div className="flex max-h-[60vh] min-w-0 flex-col gap-2 overflow-y-auto sm:max-h-[400px]">
                 {models.map((model, index) => (
                   <ModelItem key={index} index={index} model={model}
                     isFirst={index === 0} isLast={index === models.length - 1}
@@ -151,13 +159,13 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
               </div>
             )}
             <button onClick={() => setShowModelSelect(true)}
-              className="w-full mt-2 py-2 border border-dashed border-black/10 dark:border-white/10 rounded-lg text-xs text-primary font-medium hover:text-primary hover:border-primary/50 transition-colors flex items-center justify-center gap-1">
+              className="w-full mt-2.5 py-2.5 border border-dashed border-black/10 dark:border-white/10 rounded-lg text-xs text-primary font-medium hover:text-primary hover:border-primary/50 transition-colors flex items-center justify-center gap-1.5">
               <span className="material-symbols-outlined text-[16px]">add</span>
               Add Model
             </button>
           </div>
 
-          <div className="flex flex-col gap-2 pt-1 sm:flex-row">
+          <div className="flex flex-col gap-2.5 pt-2 sm:flex-row">
             <Button onClick={onClose} variant="ghost" fullWidth size="sm">Cancel</Button>
             <Button onClick={handleSave} fullWidth size="sm" disabled={!name.trim() || !!nameError || saving}>
               {saving ? "Saving..." : isEdit ? "Save" : "Create"}

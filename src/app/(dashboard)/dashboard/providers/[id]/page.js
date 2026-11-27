@@ -24,6 +24,7 @@ import EditAcpNodeModal from "./EditAcpNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
+import BulkImportMinimaxCliModal from "./BulkImportMinimaxCliModal";
 import CustomConfigCard from "./CustomConfigCard";
 import AutoPingScheduleModal from "./AutoPingScheduleModal";
 import WebLoginButton, { WEB_LOGIN_PROVIDERS } from "../components/WebLoginButton.js";
@@ -64,6 +65,8 @@ export default function ProviderDetailPage() {
   const [addConnectionError, setAddConnectionError] = useState("");
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
   const [showBulkImportGrokCli, setShowBulkImportGrokCli] = useState(false);
+  const [showBulkImportMinimaxCli, setShowBulkImportMinimaxCli] = useState(false);
+  const [importingMinimaxCli, setImportingMinimaxCli] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showEditNodeModal, setShowEditNodeModal] = useState(false);
   const [showEditAcpModal, setShowEditAcpModal] = useState(false);
@@ -1894,6 +1897,18 @@ export default function ProviderDetailPage() {
                         {importingAntigravityCli ? translate("Importing...") : translate("Import from CLI")}
                       </Button>
                     )}
+                    {providerId === "minimax-code-global" && (
+                      <Button
+                        size="sm"
+                        icon="download"
+                        variant="secondary"
+                        onClick={() => setShowBulkImportMinimaxCli(true)}
+                        disabled={importingMinimaxCli}
+                        title={translate("Import MiniMax CLI accounts from ~/.minimax/")}
+                      >
+                        {importingMinimaxCli ? translate("Importing...") : translate("Import from CLI")}
+                      </Button>
+                    )}
                     {!isAcp && (
                       <Button
                         size="sm"
@@ -1994,6 +2009,19 @@ export default function ProviderDetailPage() {
                       className="w-full sm:w-auto"
                     >
                       {importingAntigravityCli ? translate("Importing...") : translate("Import from CLI")}
+                    </Button>
+                  )}
+                  {providerId === "minimax-code-global" && (
+                    <Button
+                      size="sm"
+                      icon="download"
+                      variant="secondary"
+                      onClick={() => setShowBulkImportMinimaxCli(true)}
+                      disabled={importingMinimaxCli}
+                      title={translate("Import MiniMax CLI accounts from ~/.minimax/")}
+                      className="w-full sm:w-auto"
+                    >
+                      {importingMinimaxCli ? translate("Importing...") : translate("Import from CLI")}
                     </Button>
                   )}
                   {(providerId === "cline" || providerId === "clinepass") && (
@@ -2257,6 +2285,14 @@ export default function ProviderDetailPage() {
         <BulkImportGrokCliModal
           isOpen={showBulkImportGrokCli}
           onClose={() => setShowBulkImportGrokCli(false)}
+          onSuccess={fetchConnections}
+        />
+      )}
+
+      {providerId === "minimax-code-global" && (
+        <BulkImportMinimaxCliModal
+          isOpen={showBulkImportMinimaxCli}
+          onClose={() => setShowBulkImportMinimaxCli(false)}
           onSuccess={fetchConnections}
         />
       )}
